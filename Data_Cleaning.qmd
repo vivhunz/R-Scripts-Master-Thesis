@@ -1,0 +1,1055 @@
+---
+title: "data_cleaning"
+format: html
+editor: visual
+---
+
+------------------------------------------------------------------------
+
+# Data preparation
+
+## installing packages
+
+```{r}
+install.packages("tidyverse")
+install.packages("psych")
+install.packages("tidyr")
+install.packages("ggplot2")
+install.packages("ggalluvial")
+install.packages("flextable")
+```
+
+## loading packages
+
+```{r}
+library(tidyverse)
+library(psych)
+library(tidyr)
+library(ggplot2)
+library(ggalluvial)
+library(flextable)
+```
+
+## loading data
+
+```{r}
+dat <- read_csv2("../Data/z-prosoData_VHUNZIKER_v2.csv")
+
+```
+
+## selecting variables
+
+```{r}
+dat <- dat %>%
+  dplyr::select(K7_21:K7_Opti, #Well-being
+                K8_21:K8_Opti,
+                K9_21:K9_Opti,
+                K7_651:K7_659, #internalizing symptoms Items... aber nicht vollständige Items des SBQ, die für Imputation von KX_nSBQ_ANXDEP verwendet wurden
+                K8_653:K8_659,
+                K9_652:K9_656, K9_658:K9_659,
+                K7_nSBQ_ANXDEP, K8_nSBQ_ANXDEP, K9_nSBQ_ANXDEP, # Score Anxdep
+                K7_402:K7_ResilFriends, # Peer Support
+                K7_1101:K7_1105, K7_BullVict4, #bullying victimization
+                K8_1101:K8_1105, K8_BullVict4,
+                K5_102, K9_102, K9_102o,ADR_GenderChild, # sex/gender
+                K7_5000, K8_5000, K9_5000, # sexual attraction
+                'K5#6_ISEImax' #SES
+                )
+
+
+                
+```
+
+### Personen ID erstellen
+
+```{r}
+# create Person-ID
+dat <- dat %>%
+  mutate(person_id = row_number()) %>%
+  relocate(person_id, .before = 1)
+
+# Check if it has worked or any one is doubled
+nrow(dat)
+n_distinct(dat$person_id)
+anyDuplicated(dat$person_id)
+
+```
+
+# Missing values
+
+```{r}
+# all Values (-1,9,90,99) should be treated as NA except for person_id 90 in the variable SES
+dat <- dat %>%
+  mutate(across(
+    -c(person_id, `K5#6_ISEImax`),
+    ~ replace(., . %in% c(-1, 9, 90, 99), NA)
+  )) %>%
+  mutate(
+    `K5#6_ISEImax` = replace(
+      `K5#6_ISEImax`,
+      `K5#6_ISEImax` %in% c(-1, 9, 99), NA)
+  )
+
+
+```
+
+# Missingness
+
+```{r}
+# Missingness of analysis variables 
+missing_table <- tibble(
+  construct = c(
+    "Well-being", "Well-being", "Well-being",
+    "Internalizing", "Internalizing", "Internalizing",
+    "Sexual orientation", "Sexual orientation", "Sexual orientation",
+    "Peer support",
+    "Bullying victimization", "Bullying victimization",
+    "Gender",
+    "SES"
+  ),
+
+  wave = c(
+    "K7", "K8", "K9",
+    "K7", "K8", "K9",
+    "K7", "K8", "K9",
+    "K7",
+    "K7", "K8",
+    "Baseline",
+    "K5/6"
+  ),
+
+  variable = c(
+    "K7_Opti", "K8_Opti", "K9_Opti",
+    "K7_nSBQ_ANXDEP", "K8_nSBQ_ANXDEP", "K9_nSBQ_ANXDEP",
+    "K7_5000", "K8_5000", "K9_5000",
+    "K7_ResilFriends",
+    "K7_BullVict4", "K8_BullVict4",
+    "ADR_GenderChild",
+    "K5#6_ISEImax"
+  )
+) %>%
+  rowwise() %>%
+  mutate(
+    N_total = nrow(dat),
+    N_available = sum(!is.na(dat[[variable]])),
+    N_missing = sum(is.na(dat[[variable]])),
+    Percent_missing = round(N_missing / N_total * 100, 1)
+  ) %>%
+  ungroup()
+
+missing_table
+
+
+# Longitudinal missingness pattern: Well-being
+wb_missing_patterns <- dat %>%
+  mutate(
+    K7 = if_else(is.na(K7_Opti), "Missing", "Available"),
+    K8 = if_else(is.na(K8_Opti), "Missing", "Available"),
+    K9 = if_else(is.na(K9_Opti), "Missing", "Available")
+  ) %>%
+  count(K7, K8, K9) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 1)
+  ) %>%
+  arrange(desc(n))
+
+wb_missing_patterns
+
+# Missings of internalizing over the three waves 
+int_missing_patterns <- dat %>%
+  mutate(
+    K7 = if_else(is.na(K7_nSBQ_ANXDEP), "Missing", "Available"),
+    K8 = if_else(is.na(K8_nSBQ_ANXDEP), "Missing", "Available"),
+    K9 = if_else(is.na(K9_nSBQ_ANXDEP), "Missing", "Available")
+  ) %>%
+  count(K7, K8, K9) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 1)
+  ) %>%
+  arrange(desc(n))
+
+int_missing_patterns
+```
+
+# Classification Sexual Orientation 
+
+```{r}
+# Classification Sexual orientation 
+dat <- dat %>%
+  mutate(
+    orientation_k7 = case_when(
+      ADR_GenderChild == 1 & K7_5000 == 5 ~ "Heterosexual",
+      ADR_GenderChild == 2 & K7_5000 == 1 ~ "Heterosexual",
+      
+      ADR_GenderChild == 1 & K7_5000 %in% 1:4 ~ "Non-heterosexual",
+      ADR_GenderChild == 2 & K7_5000 %in% 2:5 ~ "Non-heterosexual",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    orientation_k8 = case_when(
+      ADR_GenderChild == 1 & K8_5000 == 5 ~ "Heterosexual",
+      ADR_GenderChild == 2 & K8_5000 == 1 ~ "Heterosexual",
+      
+      ADR_GenderChild == 1 & K8_5000 %in% 1:4 ~ "Non-heterosexual",
+      ADR_GenderChild == 2 & K8_5000 %in% 2:5 ~ "Non-heterosexual",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    orientation_k9 = case_when(
+      ADR_GenderChild == 1 & K9_5000 == 5 ~ "Heterosexual",
+      ADR_GenderChild == 2 & K9_5000 == 1 ~ "Heterosexual",
+      
+      ADR_GenderChild == 1 & K9_5000 %in% 1:4 ~ "Non-heterosexual",
+      ADR_GenderChild == 2 & K9_5000 %in% 2:5 ~ "Non-heterosexual",
+      
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# define reference group
+dat <- dat %>%
+  mutate(
+    orientation_k7 = factor(
+      orientation_k7,
+      levels = c("Heterosexual", "Non-heterosexual")
+    ),
+    orientation_k8 = factor(
+      orientation_k8,
+      levels = c("Heterosexual", "Non-heterosexual")
+    ),
+    orientation_k9 = factor(
+      orientation_k9,
+      levels = c("Heterosexual", "Non-heterosexual")
+    )
+  )
+```
+
+# Attrition Analysis
+
+```{r}
+# subdataset for attrition Analysis
+dat_selection <- dat %>%
+  mutate(
+    selection_status = if_else(
+      !is.na(orientation_k9),
+      "Included",
+      "Excluded"
+    )
+  )
+
+# compare different baseline characteristica -> do participants who weren't there anymore at K9 different at K7 from the people who stayed
+selection_table <- dat_selection %>%
+  group_by(selection_status) %>%
+  summarise(
+    n = n(),
+
+    wb_k7 = sprintf("%.2f (%.2f)",
+                    mean(K7_Opti, na.rm = TRUE),
+                    sd(K7_Opti, na.rm = TRUE)),
+
+    int_k7 = sprintf("%.2f (%.2f)",
+                     mean(K7_nSBQ_ANXDEP, na.rm = TRUE),
+                     sd(K7_nSBQ_ANXDEP, na.rm = TRUE)),
+
+    peer_k7 = sprintf("%.2f (%.2f)",
+                      mean(K7_ResilFriends, na.rm = TRUE),
+                      sd(K7_ResilFriends, na.rm = TRUE)),
+
+    bullying_k7 = sprintf("%.2f (%.2f)",
+                          mean(K7_BullVict4, na.rm = TRUE),
+                          sd(K7_BullVict4, na.rm = TRUE)),
+
+    ses = sprintf("%.2f (%.2f)",
+                  mean(`K5#6_ISEImax`, na.rm = TRUE),
+                  sd(`K5#6_ISEImax`, na.rm = TRUE)),
+
+    .groups = "drop"
+  ) %>%
+  select(-n) %>%
+  pivot_longer(
+    cols = -selection_status,
+    names_to = "Characteristic",
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = selection_status,
+    values_from = Value
+  )
+
+selection_table ### -> SES unterscheidet sich zwischen Excluded und Included
+```
+
+## Elibigles Dataset erstellen
+
+```{r}
+# select eligible sample -> ### sollte man hier auch noch für SES und sex filtern, weil das ist ja auch eine Voraussetzung für alle Modelle...
+dat_eligible <- dat %>%
+  filter(!is.na(K9_5000))
+```
+
+### Sex
+
+```{r}
+table(dat_eligible$ADR_GenderChild, useNA = "ifany")
+
+prop.table(
+  table(dat_eligible$ADR_GenderChild, useNA = "ifany")
+) * 100
+
+mean(is.na(dat_eligible$ADR_GenderChild)) * 100
+
+```
+
+### Sexual Orientation
+
+```{r}
+## HIER DAT VERWENDEN UND NICHT DAT_ELIGIBLE, WEIL JA INTERESSANT IST WIE SICH DAS ÜBER DIE DREI WELLEN ENTWICKELT UND HIERFÜR NICHT NUR DIE PERSONEN DIE BEI K9 ETWAS ANGEGEBEN HABEN ANGESCHAUT WERDEN KÖNNEN
+
+# Missingness
+table(dat$K7_5000, useNA = "ifany")
+table(dat$K8_5000, useNA = "ifany")
+table(dat$K9_5000, useNA = "ifany")
+
+# pattern missingness over the course of the three waves
+dat <- dat %>%
+  mutate(
+    sexor_pattern = case_when(
+      !is.na(K7_5000) & !is.na(K8_5000) & !is.na(K9_5000) ~ "K7_K8_K9",
+      !is.na(K7_5000) & !is.na(K8_5000) &  is.na(K9_5000) ~ "K7_K8",
+      !is.na(K7_5000) &  is.na(K8_5000) & !is.na(K9_5000) ~ "K7_K9",
+      !is.na(K7_5000) &  is.na(K8_5000) &  is.na(K9_5000) ~ "K7_only",
+       is.na(K7_5000) & !is.na(K8_5000) & !is.na(K9_5000) ~ "K8_K9",
+       is.na(K7_5000) & !is.na(K8_5000) &  is.na(K9_5000) ~ "K8_only",
+       is.na(K7_5000) &  is.na(K8_5000) & !is.na(K9_5000) ~ "K9_only",
+       is.na(K7_5000) &  is.na(K8_5000) &  is.na(K9_5000) ~ "none" 
+    )
+  )
+
+table(dat$sexor_pattern)
+
+
+#how many participants in each category 
+table(dat$orientation_k7, useNA = "ifany")
+table(dat$orientation_k8, useNA = "ifany")
+table(dat$orientation_k9, useNA = "ifany")
+
+
+# stability across the waves
+table(dat$orientation_k7, dat$orientation_k8, useNA = "ifany")
+table(dat$orientation_k8, dat$orientation_k9, useNA = "ifany")
+table(dat$orientation_k7, dat$orientation_k9, useNA = "ifany")
+
+## Who has changed classification over the course of three waves at least once? 
+dat <- dat %>%
+  mutate(
+    orientation_change = case_when(
+      
+      # all three waves there and classification stayed identical
+      !is.na(orientation_k7) &
+      !is.na(orientation_k8) &
+      !is.na(orientation_k9) &
+      orientation_k7 == orientation_k8 &
+      orientation_k8 == orientation_k9 ~ "No change",
+      
+      # all three waves there and classification changed
+      !is.na(orientation_k7) &
+      !is.na(orientation_k8) &
+      !is.na(orientation_k9) ~ "Change",
+      
+      # not all three waves theren
+      TRUE ~ NA_character_
+    )
+  )
+
+table(dat$orientation_change, useNA = "ifany")
+
+
+## rename
+dat <- dat %>%
+  mutate(
+    attraction_k7 = factor(
+      K7_5000,
+      levels = 1:5,
+      labels = c(
+        "Only men",
+        "Mainly men",
+        "Men and women equally",
+        "Mainly women",
+        "Only women"
+      )
+    ),
+    attraction_k8 = factor(
+      K8_5000,
+      levels = 1:5,
+      labels = c(
+        "Only men",
+        "Mainly men",
+        "Men and women equally",
+        "Mainly women",
+        "Only women"
+      )
+    ),
+    attraction_k9 = factor(
+      K9_5000,
+      levels = 1:5,
+      labels = c(
+        "Only men",
+        "Mainly men",
+        "Men and women equally",
+        "Mainly women",
+        "Only women"
+      )
+    )
+  )
+
+# show, who changed from one category in to another. 
+dat_eligible %>%
+  filter(
+    !is.na(orientation_k7),
+    !is.na(orientation_k8),
+    !is.na(orientation_k9)
+  ) %>%
+  filter(
+    orientation_k7 != orientation_k8 |
+    orientation_k8 != orientation_k9
+  ) %>%
+  count(
+    ADR_GenderChild,
+    orientation_k7,
+    orientation_k8,
+    orientation_k9,
+    name = "n"
+  ) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 1)
+  ) %>%
+  arrange(desc(n))
+
+
+```
+
+### Well-Being
+
+```{r}
+# plausibility check
+summary(dat_eligible$K7_Opti)
+summary(dat_eligible$K8_Opti)
+summary(dat_eligible$K9_Opti)
+
+# standard deviation 
+sd(dat_eligible$K7_Opti, na.rm = TRUE)
+sd(dat_eligible$K8_Opti, na.rm = TRUE)
+sd(dat_eligible$K9_Opti, na.rm = TRUE)
+
+# histograms
+hist(dat_eligible$K7_Opti,
+     main = "Well-being K7",
+     xlab = "Well-being")
+
+hist(dat_eligible$K8_Opti,
+     main = "Well-being K8",
+     xlab = "Well-being")
+
+hist(dat_eligible$K9_Opti,
+     main = "Well-being K9",
+     xlab = "Well-being")
+
+# cronbach's alpha
+## Wave 7
+alpha_k7 <- psych::alpha(
+  dat_eligible %>% select(K7_21:K7_24)
+)
+
+alpha_k7
+
+## Wave 8
+alpha_k8 <- psych::alpha(
+  dat_eligible %>% select(K8_21:K8_24)
+)
+
+alpha_k8
+
+## Wave 9
+alpha_k9 <- psych::alpha(
+  dat_eligible %>% select(K9_21:K9_24)
+)
+
+alpha_k9
+
+# missingness
+mean(is.na(dat_eligible$K7_Opti)) * 100
+mean(is.na(dat_eligible$K8_Opti)) * 100
+mean(is.na(dat_eligible$K9_Opti)) * 100
+
+# Number of participants with/without valid scores per wave
+dat_eligible <- dat_eligible %>%
+  mutate(
+    wb_k7_available = !is.na(K7_Opti),
+    wb_k8_available = !is.na(K8_Opti),
+    wb_k9_available = !is.na(K9_Opti)
+  )
+
+table(dat_eligible$wb_k7_available)
+table(dat_eligible$wb_k8_available)
+table(dat_eligible$wb_k9_available)
+
+# Patterns of score availability across all three waves
+dat_eligible %>%
+  count(
+    wb_k7_available,
+    wb_k8_available,
+    wb_k9_available
+  ) %>%
+  arrange(desc(n))
+```
+
+### Internalizing Symptoms
+
+```{r}
+# Plausibility
+summary(dat_eligible$K7_nSBQ_ANXDEP)
+summary(dat_eligible$K8_nSBQ_ANXDEP)
+summary(dat_eligible$K9_nSBQ_ANXDEP)
+
+# Missingness
+mean(is.na(dat_eligible$K7_nSBQ_ANXDEP)) * 100
+mean(is.na(dat_eligible$K8_nSBQ_ANXDEP)) * 100
+mean(is.na(dat_eligible$K9_nSBQ_ANXDEP)) * 100
+
+# Standard deviations
+sd(dat_eligible$K7_nSBQ_ANXDEP, na.rm = TRUE)
+sd(dat_eligible$K8_nSBQ_ANXDEP, na.rm = TRUE)
+sd(dat_eligible$K9_nSBQ_ANXDEP, na.rm = TRUE)
+
+# Distributions
+hist(dat_eligible$K7_nSBQ_ANXDEP,
+     main = "Internalizing Symptoms K7",
+     xlab = "Internalizing Symptoms")
+
+hist(dat_eligible$K8_nSBQ_ANXDEP,
+     main = "Internalizing Symptoms K8",
+     xlab = "Internalizing Symptoms")
+
+hist(dat_eligible$K9_nSBQ_ANXDEP,
+     main = "Internalizing Symptoms K9",
+     xlab = "Internalizing Symptoms")
+
+# Availability of internalizing symptoms scores across waves
+
+dat_eligible <- dat_eligible %>%
+  mutate(
+    int_k7_available = !is.na(K7_nSBQ_ANXDEP),
+    int_k8_available = !is.na(K8_nSBQ_ANXDEP),
+    int_k9_available = !is.na(K9_nSBQ_ANXDEP)
+  )
+
+# Number of participants with/without valid scores per wave
+table(dat_eligible$int_k7_available)
+table(dat_eligible$int_k8_available)
+table(dat_eligible$int_k9_available)
+
+# Patterns of score availability across all three waves
+dat_eligible %>%
+  count(
+    int_k7_available,
+    int_k8_available,
+    int_k9_available
+  ) %>%
+  arrange(desc(n))
+```
+
+### Peer Support
+
+```{r}
+# plausibility check
+summary(dat_eligible$K7_ResilFriends)
+
+# missingness
+mean(is.na(dat_eligible$K7_ResilFriends)) * 100
+
+summary(
+  dat_eligible %>%
+    select(K7_402, K7_404, K7_406)# 1st Qu. schon maximalwert -> gare keine Varianz?
+)
+
+# distribution of values
+table(dat_eligible$K7_402, useNA = "ifany") 
+table(dat_eligible$K7_404, useNA = "ifany")
+table(dat_eligible$K7_406, useNA = "ifany")
+
+# standard deviation 
+sd(dat_eligible$K7_ResilFriends, na.rm = TRUE)
+
+# histogram
+hist(
+  dat_eligible$K7_ResilFriends,
+  main = "Peer Group Social Support K7",
+  xlab = "Peer Group Social Support"
+)
+
+# cronbach's alpha
+alpha_peer <- psych::alpha(
+  dat_eligible %>%
+    select(K7_402, K7_404, K7_406)
+)
+
+alpha_peer
+```
+
+### Bullying victimization
+
+```{r}
+# plausibility check
+summary(dat_eligible$K7_BullVict4)
+summary(dat_eligible$K8_BullVict4)
+
+# missingness
+mean(is.na(dat_eligible$K7_BullVict4)) * 100
+mean(is.na(dat_eligible$K8_BullVict4)) * 100
+
+# standard deviation 
+sd(dat_eligible$K7_BullVict4, na.rm = TRUE)
+sd(dat_eligible$K8_BullVict4, na.rm = TRUE)
+
+
+# histograms
+hist(dat_eligible$K7_BullVict4,
+     main = "Bullying Victimization K7",
+     xlab = "Bullying Victimization")
+
+hist(dat_eligible$K8_BullVict4,
+     main = "Bullying Victimization K8",
+     xlab = "Bullying Victimization")
+
+# Availability of bullying scores
+dat_eligible %>%
+  summarise(
+    K7_available = sum(!is.na(K7_BullVict4)),
+    K8_available = sum(!is.na(K8_BullVict4)),
+    both_available = sum(
+      !is.na(K7_BullVict4) & !is.na(K8_BullVict4)))
+
+
+# Cronbach's alpha
+# K7
+alpha_bullying_k7 <- psych::alpha(
+  dat_eligible %>%
+    select(K7_1101:K7_1105))
+alpha_bullying_k7
+
+# K8
+alpha_bullying_k8 <- psych::alpha(
+  dat_eligible %>%
+    select(K8_1101:K8_1105))
+alpha_bullying_k8
+
+```
+
+### sex 
+
+```{r}
+# summary
+dat_eligible %>%
+  count(ADR_GenderChild) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 1)
+  )
+
+```
+
+### SES
+
+```{r}
+# plausability
+summary(dat_eligible$`K5#6_ISEImax`)
+
+# percentage of missing values
+mean(is.na(dat_eligible$`K5#6_ISEImax`)) * 100
+
+# mean
+mean(is.na(dat_eligible$`K5#6_ISEImax`)) * 100
+
+# standard deviation
+sd(dat_eligible$`K5#6_ISEImax`, na.rm = TRUE)
+
+# Histogram
+hist(
+  dat_eligible$`K5#6_ISEImax`,
+  main = "Socioeconomic Status",
+  xlab = "ISEImax"
+)
+
+# ist Wert 90 noch enthalten?
+sum(dat_eligible$`K5#6_ISEImax` == 90, na.rm = TRUE)
+```
+
+# Create consistent names
+
+```{r}
+dat_long <- dat_eligible %>%
+  rename(
+    K7_wellbeing = K7_Opti,
+    K8_wellbeing = K8_Opti,
+    K9_wellbeing = K9_Opti,
+
+    K7_internalizing = K7_nSBQ_ANXDEP,
+    K8_internalizing = K8_nSBQ_ANXDEP,
+    K9_internalizing = K9_nSBQ_ANXDEP,
+
+    K7_orientation = orientation_k7,
+    K8_orientation = orientation_k8,
+    K9_orientation = orientation_k9
+  )
+```
+
+# pivot longer
+
+```{r}
+dat_long <- dat_long %>%
+  dplyr::select(
+    person_id,
+
+    # Outcomes
+    K7_wellbeing, K8_wellbeing, K9_wellbeing,
+    K7_internalizing, K8_internalizing, K9_internalizing,
+
+    # Sexual orientation
+   # grouping variable 
+    K9_orientation,
+
+    # timeinvariant variables
+    ADR_GenderChild,
+    `K5#6_ISEImax`,
+
+    # other predictors
+    K7_ResilFriends,
+    K7_BullVict4, K8_BullVict4
+  ) %>%
+  pivot_longer(
+    cols = c(
+      K7_wellbeing, K8_wellbeing, K9_wellbeing,
+      K7_internalizing, K8_internalizing, K9_internalizing
+    ),
+    names_to = c("wave", ".value"),
+    names_pattern = "(K[789])_(.*)"
+  )
+
+
+# CHECKS
+# 1. How many participants are in the subdataset?
+nrow(dat_eligible)
+
+# 2. How many distinct person are in the long datasubset?
+n_distinct(dat_long$person_id)
+
+# 3. How many rows per wave?
+table(dat_long$wave, useNA = "ifany")
+
+# 4. How many rows per person?
+dat_long %>%
+  count(person_id) %>%
+  count(n)
+
+write.csv(dat_long, "data_06.10.2026.csv", row.names = FALSE)
+```
+
+# Descriptice Analysis
+
+## Sample description
+
+```{r}
+# sample size
+
+nrow(dat_eligible)
+
+# sex
+table(dat_eligible$ADR_GenderChild, useNA = "ifany")
+
+gender_desc <- dat_eligible %>%
+  mutate(
+    gender = factor(
+      ADR_GenderChild,
+      levels = c(1, 2),
+      labels = c("Male", "Female")
+    )
+  ) %>%
+  count(gender) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 1)
+  )
+
+gender_desc
+
+# SES
+ses_desc <- dat_eligible %>%
+  summarise(
+    N = sum(!is.na(`K5#6_ISEImax`)),
+    Missing = sum(is.na(`K5#6_ISEImax`)),
+    M = round(mean(`K5#6_ISEImax`, na.rm = TRUE), 2),
+    SD = round(sd(`K5#6_ISEImax`, na.rm = TRUE), 2),
+    Median = round(median(`K5#6_ISEImax`, na.rm = TRUE), 2),
+    Min = round(min(`K5#6_ISEImax`, na.rm = TRUE), 2),
+    Max = round(max(`K5#6_ISEImax`, na.rm = TRUE), 2)
+  )
+
+ses_desc
+
+# Sexual Orientation  -> DAT VERWENDEN, WEIL ALLE PERSONEN EINGESCHLOSSEN WERDEN HIERFÜR...
+# TABLE 1 UND 2
+# Table1 -> how many participants can be categorized in each wave 
+tab1 <- dat %>%
+  pivot_longer(c(orientation_k7, orientation_k8, orientation_k9),
+               names_to = "wave", values_to = "orientation") %>%
+  mutate(wave = toupper(sub("orientation_", "", wave)),
+         orientation = as.character(orientation)) %>%
+  group_by(wave) %>%
+  summarise(het = sum(orientation == "Heterosexual", na.rm = TRUE),
+            non = sum(orientation == "Non-heterosexual", na.rm = TRUE),
+            Missing = sum(is.na(orientation)), .groups = "drop") %>%
+  mutate(valid = het + non,
+         `Heterosexual, n (%)`     = paste0(het, " (", round(het / valid * 100, 1), ")"),
+         `Non-heterosexual, n (%)` = paste0(non, " (", round(non / valid * 100, 1), ")")) %>%
+  select(Wave = wave, `Heterosexual, n (%)`, `Non-heterosexual, n (%)`, Missing)
+
+tab1
+# Table 2 Change of classification between the waves
+trans_tab <- function(from, to, label) {
+  dat %>%
+    filter(!is.na({{ from }}), !is.na({{ to }})) %>%
+    group_by(start = {{ from }}) %>%
+    summarise(N = n(),
+              same = sum({{ from }} == {{ to }}),
+              changed = sum({{ from }} != {{ to }}), .groups = "drop") %>%
+    mutate(Comparison = label,
+           `Stayed, n (%)`  = paste0(same, " (", round(same / N * 100, 1), ")"),
+           `Changed, n (%)` = paste0(changed, " (", round(changed / N * 100, 1), ")")) %>%
+    select(Comparison, `Classification at start` = start, N,
+           `Stayed, n (%)`, `Changed, n (%)`)
+}
+tab2 <- bind_rows(
+  trans_tab(orientation_k7, orientation_k8, "K7 to K8"),
+  trans_tab(orientation_k8, orientation_k9, "K8 to K9"),
+  trans_tab(orientation_k7, orientation_k9, "K7 to K9")
+)
+
+tab2
+save_as_docx("Table 1" = flextable(tab1) %>% autofit(),
+             "Table 2" = flextable(tab2) %>% autofit(),
+             path = "tabellen_orientation.docx")
+
+# Anhang: all five answer categories 
+#dat %>%
+#  pivot_longer(c(orientation_k7, orientation_k8, orientation_k9),
+#               names_to = "wave", values_to = "attraction") %>%
+ # count(wave, ADR_GenderChild, attraction) %>%
+#  group_by(wave, ADR_GenderChild) %>%
+#  mutate(percent = round(n / sum(n) * 100, 1))
+#orientation_desc <- dat_eligible %>%                  ##### FUNKTIONIERT NOCH NICHT
+#  filter(!is.na(orientation_k9)) %>%
+#  count(wave, orientation_k9) %>%
+#  group_by(wave) %>%
+#  mutate(
+#    percent = round(n / sum(n) * 100, 1)
+#  ) %>%
+#  ungroup()
+
+#orientation_desc
+```
+
+## Univariate description
+
+```{r}
+descriptive_table <- tibble(
+  construct = c(
+    "Well-being",
+    "Well-being",
+    "Well-being",
+    "Internalizing symptoms",
+    "Internalizing symptoms",
+    "Internalizing symptoms",
+    "Peer support",
+    "Bullying victimization",
+    "Bullying victimization",
+    "SES"
+  ),
+  
+  wave = c(
+    "K7",
+    "K8",
+    "K9",
+    "K7",
+    "K8",
+    "K9",
+    "K7",
+    "K7",
+    "K8",
+    "K5/6"
+  ),
+  
+  variable = c(
+    "K7_Opti",
+    "K8_Opti",
+    "K9_Opti",
+    "K7_nSBQ_ANXDEP",  
+    "K8_nSBQ_ANXDEP",   
+    "K9_nSBQ_ANXDEP",   
+    "K7_ResilFriends",
+    "K7_BullVict4",
+    "K8_BullVict4",
+    "K5#6_ISEImax"
+  )
+) %>%
+  rowwise() %>%
+  mutate(
+    N = sum(!is.na(dat_eligible[[variable]])),
+    
+    M = round(
+      mean(dat_eligible[[variable]], na.rm = TRUE),
+      2
+    ),
+    
+    SD = round(
+      sd(dat_eligible[[variable]], na.rm = TRUE),
+      2
+    ),
+    
+    Median = round(
+      median(dat_eligible[[variable]], na.rm = TRUE),
+      2
+    ),
+    
+    Min = round(
+      min(dat_eligible[[variable]], na.rm = TRUE),
+      2
+    ),
+    
+    Max = round(
+      max(dat_eligible[[variable]], na.rm = TRUE),
+      2
+    )
+  ) %>%
+  ungroup()
+
+descriptive_table
+```
+
+## Mental Health at each wave seperated for SMY und HMY
+
+```{r}
+# Wellbeing
+wellbeing_summary <- dat_long %>%
+  filter(
+    !is.na(wellbeing),
+    !is.na(K9_orientation)
+  ) %>%
+  group_by(wave, K9_orientation) %>%
+  summarise(
+    N = n(),
+    M = round(mean(wellbeing), 2),
+    SD = round(sd(wellbeing), 2),
+    .groups = "drop"
+  )
+wellbeing_summary
+
+# internalizing
+internalizing_summary <- dat_long %>%
+  filter(
+    !is.na(internalizing),
+    !is.na(K9_orientation)
+  ) %>%
+  group_by(wave, K9_orientation) %>%
+  summarise(
+    N = n(),
+    M = mean(internalizing),
+    SD = sd(internalizing),
+    .groups = "drop"
+  )
+internalizing_summary
+```
+
+### Plot of mental health over the course of time
+
+```{r}
+# Plot internalizing over time separated for SMY and HMY
+pd <- position_dodge(width = 0.25)
+
+p <- ggplot(
+  wellbeing_summary,
+  aes(
+    x = wave,
+    y = M,
+    group = K9_orientation,
+    linetype = K9_orientation,
+    shape = K9_orientation
+  )
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(
+    aes(ymin = M - SD, ymax = M + SD),
+    width = 0.1,
+    linewidth = 0.5,
+    linetype = "solid",   
+    position = pd
+  ) +
+  labs(
+    x = "Assessment wave",
+    y = "Wellbeing (M ± SD)",
+    linetype = "Sexual orientation",
+    shape = "Sexual orientation"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.title      = element_text(size = 10),
+    axis.text       = element_text(size = 9, color = "black"),
+    legend.title    = element_text(size = 10),
+    legend.text     = element_text(size = 9),
+    legend.position = "bottom",
+    legend.key.width = unit(1.2, "cm")  
+  )
+
+p
+
+# Plot of internalizing over time separated for SMY and HMY
+pd <- position_dodge(width = 0.25)
+
+p <- ggplot(
+  internalizing_summary,
+  aes(
+    x = wave,
+    y = M,
+    group = K9_orientation,
+    linetype = K9_orientation,
+    shape = K9_orientation
+  )
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(
+    aes(ymin = M - SD, ymax = M + SD),
+    width = 0.1,
+    linewidth = 0.5,
+    linetype = "solid",   
+    position = pd
+  ) +
+  labs(
+    x = "Assessment wave",
+    y = "Internalizing symptoms (M ± SD)",
+    linetype = "Sexual orientation",
+    shape = "Sexual orientation"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.title      = element_text(size = 10),
+    axis.text       = element_text(size = 9, color = "black"),
+    legend.title    = element_text(size = 10),
+    legend.text     = element_text(size = 9),
+    legend.position = "bottom",
+    legend.key.width = unit(1.2, "cm")  
+  )
+
+p
+```

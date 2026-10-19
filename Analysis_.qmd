@@ -1,0 +1,1420 @@
+---
+title: "analysis"
+format: html
+editor: visual
+---
+
+# Analysis
+
+## Install packages
+```{r}
+install.packages("lmerTest")
+install.packages("performance")
+install.packages("emmeans")
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("patchwork")
+install.packages("influence.ME")
+install.packages("parameters")
+install.packages("car")
+```
+
+## Load packages
+```{r}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(performance)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(influence.ME)
+library(parameters)
+library(car)
+```
+
+# Load data
+
+```{r}
+dat <- read_delim("/Users/vivianhunziker/Desktop/Master Thesis Vivian Hunziker/Data/data_06.10.2026.csv")
+
+
+
+# SEX -> MUSS NOCH IM ANDEREN DOK GEMACHT WERDEN... 
+dat <- dat %>%
+  rename(sex = ADR_GenderChild) %>%
+  mutate(
+    sex = na_if(sex, -1),
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female"))
+  )
+
+table(dat$sex, useNA = "ifany")   # Kontrolle
+
+# SES
+dat <- dat %>%
+  rename(ses = `K5#6_ISEImax`) %>%
+  mutate(ses = na_if(ses, -1))   # -1 = fehlend -> NA
+```
+
+# H1
+
+## H1a: well-being
+
+```{r}
+# Filter datased
+dat_rq1_wb <- dat %>%
+  filter(#!is.na(wellbeing), 
+    !is.na(K9_orientation), !is.na(sex), !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+
+# model zero
+m0_wb <- lmer(
+  wellbeing ~ 1 + (1 | person_id),
+  data = dat_rq1_wb,
+  REML = TRUE
+)
+
+summary(m0_wb)
+icc(m0_wb)
+
+# main model
+m3_wb <- lmer(
+  wellbeing ~ wave * K9_orientation + sex + ses_c +
+    (1 | person_id),
+  data = dat_rq1_wb,
+  REML = TRUE
+)
+
+summary(m3_wb)
+
+confint(m3_wb, parm = "beta_", method = "Wald")
+
+# 1. Omnibus tests
+anova(m3_wb)
+
+# 2. Estimated marginal means
+emm_wb <- emmeans(m3_wb, ~ K9_orientation | wave)
+summary(emm_wb, infer = c(TRUE, FALSE))
+
+# 3. Group differences within waves
+diff_wb <- pairs(emm_wb)
+summary(diff_wb, infer = c(TRUE, FALSE))
+
+# 4. Standardized group differences
+
+ #Extract the existing group contrasts
+diff_wb_ci <- as.data.frame(summary(diff_wb, infer = c(TRUE, FALSE)))
+ #Calculate the model-implied total standard deviation
+vc_wb <- as.data.frame(VarCorr(m3_wb))
+sd_total_wb <- sqrt(sum(vc_wb$vcov))
+# Calculate standardized group differences
+diff_wb_ci$d <- diff_wb_ci$estimate / sd_total_wb
+# Calculate approximate standardized confidence interval limits
+diff_wb_ci$d_low <- diff_wb_ci$asymp.LCL / sd_total_wb
+diff_wb_ci$d_up <- diff_wb_ci$asymp.UCL / sd_total_wb
+
+diff_wb_ci
+
+# 5. Changes in group differences across waves
+change_wb <- contrast(
+  diff_wb,
+  method = "revpairwise",
+  by = NULL
+)
+summary(change_wb, infer = c(TRUE, TRUE))
+
+# 6. Within-group changes across assessment waves
+
+# Estimate well-being at each wave within each orientation group
+emm_wb_time <- emmeans(
+  m3_wb,
+  ~ wave | K9_orientation
+)
+
+# Compare waves within each orientation group
+time_diff_wb <- pairs(emm_wb_time)
+
+# Display within-group changes and 95% confidence intervals
+summary(time_diff_wb, infer = c(TRUE, FALSE))
+```
+
+### Plot
+
+```{r}
+pd <- position_dodge(width = 0.25)
+
+# Panel A: estimated mean
+emm_df <- as.data.frame(emm_wb)
+
+p_means <- ggplot(
+  emm_df,
+  aes(x = wave, y = emmean, group = K9_orientation,
+      linetype = K9_orientation, shape = K9_orientation)
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL),
+                width = 0.1, linewidth = 0.5,
+                linetype = "solid", position = pd) +
+  labs(x = "Assessment wave", y = "Estimated well-being",
+       linetype = "Sexual orientation", shape = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.text = element_text(size = 9, color = "black"),
+        legend.position = "bottom",
+        legend.key.width = unit(1.2, "cm"))
+
+p_means
+```
+
+# Model assumptions H1a
+
+```{r}
+# 1. Normally Distributed Residuals
+#  Level-1: standardised residuals
+res_wb <- residuals(m3_wb, scaled = TRUE)
+
+#  Level-2: random intercepts
+ri_wb <- ranef(m3_wb)$person_id[, "(Intercept)"]
+
+# Plots two sho Level-1 residuals and random intercepts
+par(mfrow = c(1, 2))
+
+# Level-1-residuals
+qqnorm(
+  res_wb,
+  main = "Level-1: Residuen",
+  xlab = "Theoretical Quantiles",
+  ylab = "Standardized Residuals",
+  pch = 1
+)
+qqline(res_wb, col = "red", lwd = 2)
+
+# Level-2: Random Intercepts
+qqnorm(
+  ri_wb,
+  main = "Level-2: Random Intercepts",
+  xlab = "Theoretical Quantiles",
+  ylab = "Random Intercepts",
+  pch = 1
+)
+qqline(ri_wb, col = "red", lwd = 2)
+
+# set back graphical information
+par(mfrow = c(1, 1))
+
+
+# 2. Linearity
+# Wave is modeled as a categorical predictor; therefore,no linear time trend is assumed.
+
+
+# 3. Homoscedascity
+# Level-1 residuals per wave
+
+# data for diagnostics
+dat_diag <- data.frame(
+  residual = residuals(m3_wb),
+  wave = model.frame(m3_wb)$wave,
+  orientation = model.frame(m3_wb)$K9_orientation
+)
+
+ggplot(dat_diag, aes(x = wave, y = residual)) +
+  geom_jitter(width = 0.15, alpha = 0.15, color = "blue") +
+  geom_boxplot(width = 0.4, alpha = 0.2, outlier.shape = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Level-1 Residuals by Wave",
+    x = "Assessment Wave",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Level-1 residuals by Waxe x Orientation
+ggplot(
+  dat_diag,
+  aes(x = wave, y = residual, fill = orientation)
+) +
+  geom_boxplot(
+    position = position_dodge(width = 0.8),
+    alpha = 0.5,
+    outlier.shape = NA
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Level-1 Residuals by Wave and Orientation",
+    x = "Assessment Wave",
+    y = "Residuals",
+    fill = "Sexual Attraction"
+  ) +
+  theme_minimal()
+
+
+
+# 4. Outlier
+# Level-1 outlier
+
+# Data out of the estimated model
+dat_out_wb <- model.frame(m3_wb) %>%
+  mutate(
+    fitted = fitted(m3_wb),
+    residual = residuals(m3_wb),
+    std_residual = residuals(m3_wb, scaled = TRUE)
+  )
+
+# number of unusual participants
+sum(abs(dat_out_wb$std_residual) > 3)
+
+# show unusual participants 
+outliers_L1_wb <- dat_out_wb %>%
+  filter(abs(std_residual) > 3) %>%
+  arrange(desc(abs(std_residual)))
+
+outliers_L1_wb
+
+# Plot: Level-1 outliers
+ggplot(dat_out_wb,
+       aes(x = fitted, y = std_residual)) +
+  geom_point(alpha = 0.2, color = "grey50") +
+  geom_point(
+    data = outliers_L1_wb,
+    color = "red",
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = c(-3, 0, 3),
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Level-1 Outliers: Well-being",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal()
+
+
+
+# Level-2 outliers
+# extract random intercepts
+ri_wb <- ranef(m3_wb)$person_id[, "(Intercept)"]
+
+dat_ri_wb <- data.frame(
+  person_id = rownames(ranef(m3_wb)$person_id),
+  random_intercept = as.numeric(ri_wb)
+) %>%
+  mutate(
+    z_intercept = as.numeric(scale(random_intercept))
+  )
+
+# number of unusual random intercepts
+sum(abs(dat_ri_wb$z_intercept) > 3)
+
+# unusual participants
+outliers_L2_wb <- dat_ri_wb %>%
+  filter(abs(z_intercept) > 3) %>%
+  arrange(desc(abs(z_intercept)))
+
+outliers_L2_wb
+
+# Plot: level-2 outlier
+ggplot(dat_ri_wb,
+       aes(x = random_intercept, y = z_intercept)) +
+  geom_point(alpha = 0.3, color = "grey50") +
+  geom_point(
+    data = outliers_L2_wb,
+    color = "red",
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = c(-3, 3),
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Level-2 Outliers: Random Intercepts",
+    x = "Estimated Random Intercept",
+    y = "Standardized Random Intercept"
+  ) +
+  theme_minimal()
+
+
+
+# individual unusual trajectories ouver time
+ids_out_wb <- outliers_L2_wb$person_id
+
+# data out of the estimated model
+dat_plot_wb <- model.frame(m3_wb) %>%
+  mutate(
+    person_id = as.character(person_id),
+    outlier = if_else(
+      person_id %in% ids_out_wb,
+      "Auffälliger Random Intercept",
+      "Übrige Personen"
+    )
+  )
+
+# Plot
+ggplot(dat_plot_wb,
+       aes(x = wave, y = wellbeing,
+           group = person_id)) +
+  geom_line(
+    data = subset(dat_plot_wb,
+                  outlier == "Übrige Personen"),
+    color = "grey70",
+    alpha = 0.12
+  ) +
+  geom_line(
+    data = subset(dat_plot_wb,
+                  outlier == "Auffälliger Random Intercept"),
+    color = "red",
+    linewidth = 0.8,
+    alpha = 0.8
+  ) +
+  labs(
+    title = "Individual Well-being Trajectories",
+    x = "Assessment Wave",
+    y = "Well-being"
+  ) +
+  theme_minimal()
+
+
+
+# 5. Influential Participants
+# influence diagnostic on person level
+infl_wb <- influence(
+  m3_wb,
+  group = "person_id"
+)
+
+# Calculate Cook's distance for each participant
+cooks_wb <- cooks.distance(infl_wb)
+
+# Plot Cook's Distance
+plot(
+  cooks_wb,
+  type = "h",
+  main = "Cook's Distance by Participant",
+  xlab = "Participant",
+  ylab = "Cook's Distance"
+)
+
+# 10 biggest values
+head(sort(cooks_wb, decreasing = TRUE), 10)
+
+
+
+# 6. convergence and singularity
+# convergence
+check_convergence(m3_wb)
+
+# singularity
+check_singularity(m3_wb)
+```
+
+## H1b: internalizing
+
+```{r}
+# Filter datased  -> HIER NOCH SCHREIBEN WIESO SES MEAN-CENTERED UND / 10 GERECHNET WURDE.. 
+dat_rq1_int <- dat %>%
+  filter( !is.na(K9_orientation), !is.na(sex), !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+
+# model zero
+m0_int <- lmer(
+  internalizing ~ 1 + (1 | person_id),
+  data = dat_rq1_int,
+  REML = TRUE
+)
+
+summary(m0_int)
+icc(m0_int)
+
+# main model
+m3_int <- lmer(
+  internalizing ~ wave * K9_orientation + sex + ses_c +
+    (1 | person_id),
+  data = dat_rq1_int,
+  REML = TRUE
+)
+
+summary(m3_int)
+
+
+
+# 1. Omnibus tests
+anova(m3_int) #### SEX WAR SIGNIFIKANT, WAS BEDEUTET DAS? ANSCHAUEN
+
+
+# 2. Estimated marginal means
+emm_int <- emmeans(m3_int, ~ K9_orientation | wave)
+summary(emm_int, infer = c(TRUE, FALSE))
+
+
+# 3. Group differences within waves
+diff_int <- pairs(emm_int)
+summary(diff_int, infer = c(TRUE, FALSE))
+
+
+# 4. Standardized group differences
+
+# Extract the existing group contrasts
+diff_int_ci <- as.data.frame(summary(diff_int, infer = c(TRUE, FALSE)))
+
+# Calculate the model-implied total standard deviation
+vc_int <- as.data.frame(VarCorr(m3_int))
+sd_total_int <- sqrt(sum(vc_int$vcov))
+
+# Calculate standardized group differences
+diff_int_ci$d <- diff_int_ci$estimate / sd_total_int
+
+# Calculate approximate standardized confidence interval limits
+diff_int_ci$d_low <- diff_int_ci$asymp.LCL / sd_total_int
+diff_int_ci$d_up <- diff_int_ci$asymp.UCL / sd_total_int
+
+diff_int_ci
+
+
+# 5. Changes in group differences across waves
+change_int <- contrast(
+  diff_int,
+  method = "revpairwise",
+  by = NULL
+)
+
+summary(change_int, infer = c(TRUE, TRUE))
+
+
+# 6. Within-group changes across assessment waves
+# Estimate internalizing symptoms at each wave within each orientation group
+emm_int_time <- emmeans(m3_int, ~ wave | K9_orientation)
+
+# Compare waves within each orientation group
+time_diff_int <- pairs(emm_int_time)
+
+# Display within-group changes and 95% confidence intervals
+summary(time_diff_int, infer = c(TRUE, FALSE))
+```
+
+### Plot
+
+```{r}
+pd <- position_dodge(width = 0.25)
+
+# Panel A: estimated means
+emm_df_int <- as.data.frame(emm_int)
+
+p_means_int <- ggplot(
+  emm_df_int,
+  aes(x = wave, y = emmean, group = K9_orientation,
+      linetype = K9_orientation, shape = K9_orientation)
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL),
+                width = 0.1, linewidth = 0.5,
+                linetype = "solid", position = pd) +
+  labs(x = "Assessment wave", y = "Estimated internalizing symptoms",
+       linetype = "Sexual orientation", shape = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.text = element_text(size = 9, color = "black"),
+        legend.position = "bottom",
+        legend.key.width = unit(1.2, "cm"))
+
+p_means_int
+```
+
+# Model assumptions
+
+```{r}
+# 1. Normally Distributed Residuals
+
+# Level-1: Standardized residuals
+res_int <- residuals(m3_int, scaled = TRUE)
+
+# Level-2: Random intercepts
+ri_int <- ranef(m3_int)$person_id[, "(Intercept)"]
+
+# Plot Level-1 residuals and random intercepts
+par(mfrow = c(1, 2))
+
+# Level-1 residuals
+qqnorm(
+  res_int,
+  main = "Level-1: Residuals",
+  xlab = "Theoretical Quantiles",
+  ylab = "Standardized Residuals",
+  pch = 1
+)
+qqline(res_int, col = "red", lwd = 2)
+
+# Level-2: Random intercepts
+qqnorm(
+  ri_int,
+  main = "Level-2: Random Intercepts",
+  xlab = "Theoretical Quantiles",
+  ylab = "Random Intercepts",
+  pch = 1
+)
+qqline(ri_int, col = "red", lwd = 2)
+
+# Reset graphical parameters
+par(mfrow = c(1, 1))
+
+
+# 2. Linearity
+# Wave is modeled as a categorical predictor; therefore,no linear time trend is assumed.
+# -> was ist mit ses?????
+
+
+# 3. Homoscedasticity
+# Level-1 residuals by wave
+dat_diag_int <- data.frame(
+  residual = residuals(m3_int),
+  wave = model.frame(m3_int)$wave,
+  orientation = model.frame(m3_int)$K9_orientation
+)
+
+ggplot(dat_diag_int, aes(x = wave, y = residual)) +
+  geom_jitter(width = 0.15, alpha = 0.15, color = "blue") +
+  geom_boxplot(width = 0.4, alpha = 0.2, outlier.shape = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Level-1 Residuals by Wave",
+    x = "Assessment Wave",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+
+# Level-1 residuals by wave and orientation
+ggplot(
+  dat_diag_int,
+  aes(x = wave, y = residual, fill = orientation)
+) +
+  geom_boxplot(
+    position = position_dodge(width = 0.8),
+    alpha = 0.5,
+    outlier.shape = NA
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Level-1 Residuals by Wave and Orientation",
+    x = "Assessment Wave",
+    y = "Residuals",
+    fill = "Sexual Attraction"
+  ) +
+  theme_minimal()
+
+
+# 4. Outliers
+# Level-1 outliers
+# Extract data from the fitted model
+dat_out_int <- model.frame(m3_int) %>%
+  mutate(
+    fitted = fitted(m3_int),
+    residual = residuals(m3_int),
+    std_residual = residuals(m3_int, scaled = TRUE)
+  )
+
+# Count unusual observations
+sum(abs(dat_out_int$std_residual) > 3)
+
+# Display unusual observations
+outliers_L1_int <- dat_out_int %>%
+  filter(abs(std_residual) > 3) %>%
+  arrange(desc(abs(std_residual)))
+
+outliers_L1_int
+
+
+# Plot Level-1 outliers
+ggplot(
+  dat_out_int,
+  aes(x = fitted, y = std_residual)
+) +
+  geom_point(alpha = 0.2, color = "grey50") +
+  geom_point(
+    data = outliers_L1_int,
+    color = "red",
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = c(-3, 0, 3),
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Level-1 Outliers: Internalizing Symptoms",
+    x = "Fitted Values",
+    y = "Standardized Residuals"
+  ) +
+  theme_minimal()
+
+
+# Level-2 outliers
+# Extract random intercepts
+ri_int <- ranef(m3_int)$person_id[, "(Intercept)"]
+
+dat_ri_int <- data.frame(
+  person_id = rownames(ranef(m3_int)$person_id),
+  random_intercept = as.numeric(ri_int)
+) %>%
+  mutate(
+    z_intercept = as.numeric(scale(random_intercept))
+  )
+
+# Count unusual random intercepts
+sum(abs(dat_ri_int$z_intercept) > 3)
+
+# Display unusual participants
+outliers_L2_int <- dat_ri_int %>%
+  filter(abs(z_intercept) > 3) %>%
+  arrange(desc(abs(z_intercept)))
+
+outliers_L2_int
+
+
+# Plot Level-2 outliers
+ggplot(
+  dat_ri_int,
+  aes(x = random_intercept, y = z_intercept)
+) +
+  geom_point(alpha = 0.3, color = "grey50") +
+  geom_point(
+    data = outliers_L2_int,
+    color = "red",
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = c(-3, 3),
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Level-2 Outliers: Random Intercepts",
+    x = "Estimated Random Intercept",
+    y = "Standardized Random Intercept"
+  ) +
+  theme_minimal()
+
+
+# Individual unusual trajectories over time
+
+# Identify participants with unusual random intercepts
+ids_out_int <- outliers_L2_int$person_id
+
+# Extract model data and participant identifiers
+dat_plot_int <- model.frame(m3_int) %>%
+  mutate(
+    person_id = as.character(person_id),
+    outlier = if_else(
+      person_id %in% ids_out_int,
+      "Unusual Random Intercept",
+      "Other Participants"
+    )
+  )
+
+# Plot individual internalizing trajectories
+ggplot(
+  dat_plot_int,
+  aes(
+    x = wave,
+    y = internalizing,
+    group = person_id
+  )
+) +
+  geom_line(
+    data = subset(
+      dat_plot_int,
+      outlier == "Other Participants"
+    ),
+    color = "grey70",
+    alpha = 0.12
+  ) +
+  geom_line(
+    data = subset(
+      dat_plot_int,
+      outlier == "Unusual Random Intercept"
+    ),
+    color = "red",
+    linewidth = 0.8,
+    alpha = 0.8
+  ) +
+  labs(
+    title = "Individual Internalizing Trajectories",
+    x = "Assessment Wave",
+    y = "Internalizing Symptoms"
+  ) +
+  theme_minimal()
+
+
+# 5. Influential Participants
+# Influence diagnostics at the participant level
+infl_int <- influence(
+  m3_int,
+  group = "person_id"
+)
+
+# Calculate Cook's distance for each participant
+cooks_int <- cooks.distance(infl_int)
+
+# Plot Cook's distance
+plot(
+  cooks_int,
+  type = "h",
+  main = "Cook's Distance by Participant",
+  xlab = "Participant",
+  ylab = "Cook's Distance"
+)
+
+# Display the 10 largest values
+head(sort(cooks_int, decreasing = TRUE), 10)
+
+
+# 6. Convergence and Singularity
+# Check convergence
+check_convergence(m3_int)
+
+# Check singularity
+check_singularity(m3_int)
+```
+
+# H2a: well-being 
+
+```{r}
+# K7 Well-being as baseline for each participant
+baseline_wb <- dat %>%
+  filter(wave == "K7") %>%
+  select(person_id, wellbeing_K7 = wellbeing)
+
+# join 
+dat_rq2_wb <- dat %>%
+  left_join(baseline_wb, by = "person_id")
+
+nrow(dat_rq2_wb)
+
+# CHECK if a participant needs more than one row
+baseline_wb %>% count(person_id) %>% filter(n > 1)
+
+# select complete cases
+dat_rq2_wb_k9 <- dat_rq2_wb %>%
+  filter(wave == "K9") %>%
+  filter(
+    !is.na(wellbeing),
+    !is.na(wellbeing_K7),
+    !is.na(K7_ResilFriends),
+    !is.na(K9_orientation),
+    !is.na(sex),
+    !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+table(dat_rq2_wb_k9$K9_orientation)
+
+# center inernalizing and K7_ResilFriends ### -> vielleicht in ein separaten Chunk tun
+dat_rq2_wb_k9 <- dat_rq2_wb_k9 %>%
+  mutate(
+    wb_K7_c = wellbeing_K7 -
+      mean(wellbeing_K7, na.rm = TRUE),
+
+    peer_c = K7_ResilFriends -
+      mean(K7_ResilFriends, na.rm = TRUE)
+  )
+
+# Base model
+model_rq2_wb_base <- lm(
+  wellbeing ~ wb_K7_c +
+    peer_c + K9_orientation + sex + ses_c,
+  data = dat_rq2_wb_k9
+)
+
+summary(model_rq2_wb_base)
+
+
+# Interactionmodel
+model_rq2_wb_mod <- lm(
+  wellbeing ~ wb_K7_c +
+    peer_c * K9_orientation + sex + ses_c,
+  data = dat_rq2_wb_k9
+)
+
+summary(model_rq2_wb_mod)
+
+# Cohens D 
+parameters::standardize_parameters(model_rq2_wb_mod, method = "refit")
+
+# 95%-CI
+confint(model_rq2_wb_base)
+confint(model_rq2_wb_mod)
+
+# Modellgüte
+summary(model_rq2_wb_base)$r.squared
+summary(model_rq2_wb_mod)$r.squared
+
+# adjusted R²
+summary(model_rq2_wb_base)$adj.r.squared
+summary(model_rq2_wb_mod)$adj.r.squared
+
+# additionally explained value 
+delta_R2 <-
+  summary(model_rq2_wb_mod)$r.squared -
+  summary(model_rq2_wb_base)$r.squared
+
+delta_R2
+```
+
+## Plot
+
+```{r}
+cols <- c("Heterosexual"     = "#D55E00",
+          "Non-heterosexual" = "#0072B2")
+
+# Mean value used to center peer_c (data from H2a!)
+peer_mean_wb <- mean(dat_rq2_wb_k9$K7_ResilFriends, na.rm = TRUE)
+peer_grid_wb <- seq(2.33, 4, length.out = 50)
+
+pred_wb <- emmeans(
+  model_rq2_wb_mod,
+  ~ K9_orientation | peer_c,
+  at = list(peer_c = peer_grid_wb - peer_mean_wb, wb_K7_c = 0)
+)
+pred_df_wb <- as.data.frame(pred_wb) |>
+  mutate(peer = peer_c + peer_mean_wb)
+
+# Number of individuals per measurement value and group (from 2.33 onwards)
+obs_wb <- dat_rq2_wb_k9 %>%
+  filter(K7_ResilFriends >= 2.33) %>%
+  mutate(peer = round(K7_ResilFriends, 2)) %>%
+  count(peer, K9_orientation) %>%
+  tidyr::complete(peer, K9_orientation, fill = list(n = 0))
+
+# Main plot (full scale 1–4, without x-axis label)
+p_main_wb <- ggplot(
+  pred_df_wb,
+  aes(x = peer, y = emmean, color = K9_orientation,
+      fill = K9_orientation, linetype = K9_orientation)
+) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.12, color = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  coord_cartesian(xlim = c(2.2, 4.1), ylim = c(1, 4)) +
+  labs(y = "Predicted well-being at K9",
+       color = "Sexual orientation", fill = "Sexual orientation",
+       linetype = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text    = element_text(size = 9, color = "black"))
+
+# number row
+p_n_wb <- ggplot(obs_wb, aes(x = peer, y = K9_orientation,
+                             label = n, color = K9_orientation)) +
+  geom_text(size = 3) +
+  scale_color_manual(values = cols, guide = "none") +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  scale_y_discrete(limits = rev) +
+  coord_cartesian(xlim = c(2.2, 4.1)) +
+  labs(x = "Peer support at K7", y = NULL) +
+  theme_classic(base_size = 10) +
+  theme(axis.text    = element_text(size = 9, color = "black"),
+        axis.line.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+p_int_wb <- (p_main_wb / p_n_wb +
+  plot_layout(heights = c(5, 1), guides = "collect")) &
+  theme(legend.position  = "bottom",
+        legend.title     = element_text(size = 10),
+        legend.text      = element_text(size = 9),
+        legend.key.width = unit(1.2, "cm"))
+
+p_int_wb
+
+ggsave("abb_h2a_wellbeing.png", p_int_wb,
+       width = 14, height = 10, units = "cm", dpi = 300)
+
+# For the figure caption: how many individuals fall below 2.33?
+sum(dat_rq2_wb_k9$K7_ResilFriends < 2.33)
+```
+
+### Model assumptions
+
+```{r}
+# 1. Normality of Residuals
+# Plot standardized residuals
+par(mfrow = c(1, 2))
+
+qqnorm(
+  rstandard(model_rq2_wb_mod),
+  main = "Q-Q Plot: Residuals"
+)
+qqline(rstandard(model_rq2_wb_mod), col = "red")
+
+hist(
+  rstandard(model_rq2_wb_mod),
+  main = "Distribution of Residuals",
+  xlab = "Standardized Residuals"
+)
+
+par(mfrow = c(1, 1))
+
+
+# 2. Linearity
+# Check linearity of continuous predictors in the base model
+car::crPlots(
+  model_rq2_wb_base,
+  terms = ~ wb_K7_c + peer_c + ses_c
+)
+
+
+# 3. Homoscedasticity
+# Extract fitted values and residuals from the moderation model
+dat_diag_rq2_wb <- data.frame(
+  fitted = fitted(model_rq2_wb_mod),
+  residual = residuals(model_rq2_wb_mod)
+)
+
+# Plot residuals against fitted values
+ggplot(
+  dat_diag_rq2_wb,
+  aes(x = fitted, y = residual)
+) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+
+# 4. Outliers
+# Calculate standardized residuals
+std_res_wb <- rstandard(model_rq2_wb_mod)
+
+# Count observations with absolute standardized residuals above 3
+sum(abs(std_res_wb) > 3)
+
+# Identify unusual observations
+which(abs(std_res_wb) > 3)
+
+
+# 5. Influential Observations
+# Calculate Cook's distance
+cd_wb <- cooks.distance(model_rq2_wb_mod)
+
+# Plot Cook's distance
+plot(
+  cd_wb,
+  type = "h",
+  main = "Cook's Distance: Well-being",
+  xlab = "Observation",
+  ylab = "Cook's Distance"
+)
+
+# Display the 10 largest Cook's distances
+head(sort(cd_wb, decreasing = TRUE), 10)
+
+# Count observations exceeding the heuristic threshold
+sum(cd_wb > 4 / nobs(model_rq2_wb_mod))
+
+
+# 6. Multicollinearity
+# Check variance inflation factors for the base model
+car::vif(model_rq2_wb_base)
+
+# Check variance inflation factors for the moderation model
+car::vif(model_rq2_wb_mod)
+
+
+
+
+# Sensitivity Analyses
+# Identify the three most influential observations
+top3_wb <- order(cd_wb, decreasing = TRUE)[
+  seq_len(min(3, length(cd_wb)))
+]
+
+# Refit the model after excluding the three most influential cases
+model_wb_sens_a <- update(
+  model_rq2_wb_mod,
+  data = model.frame(model_rq2_wb_mod)[-top3_wb, , drop = FALSE]
+)
+
+# Identify observations exceeding Cook's distance threshold
+keep_wb <- cd_wb <= 4 / nobs(model_rq2_wb_mod)
+
+# Refit the model after excluding observations above the threshold
+model_wb_sens_b <- update(
+  model_rq2_wb_mod,
+  data = model.frame(model_rq2_wb_mod)[keep_wb, , drop = FALSE]
+)
+
+# Compare regression coefficients across models
+cbind(
+  full = coef(model_rq2_wb_mod),
+  without_top3 = coef(model_wb_sens_a),
+  without_4n = coef(model_wb_sens_b)
+)
+
+# Compare confidence intervals
+confint(model_rq2_wb_mod)
+confint(model_wb_sens_a)
+confint(model_wb_sens_b)
+
+```
+
+#### Missing data report based on complete-case analysis
+
+```{r}
+# select all variables
+dat_missing_rq2_wb <- dat_rq2_wb %>%
+  filter(wave == "K9") %>%
+  mutate(
+    complete_rq2 = complete.cases(
+      wellbeing, wellbeing_K7, K7_ResilFriends,
+      K9_orientation, sex, ses
+    )
+  )
+
+# summarize
+dat_missing_rq2_wb %>%
+  summarise(
+    N_total = n(),
+    missing_wb_K9 = sum(is.na(wellbeing)),
+    missing_wb_K7 = sum(is.na(wellbeing_K7)),
+    missing_peer = sum(is.na(K7_ResilFriends)),
+    missing_orientation = sum(is.na(K9_orientation)),
+    missing_sex = sum(is.na(sex)),
+    missing_ses = sum(is.na(ses)),
+    N_complete = sum(complete_rq2),
+    N_incomplete = sum(!complete_rq2),
+    percent_complete = round(mean(complete_rq2) * 100, 1)
+  )
+
+# show included and excluded participants separate per variable
+dat_missing_rq2_wb %>%
+  group_by(K9_orientation, complete_rq2) %>%
+  summarise(
+    N = n(),
+    mean_int_K7 = mean(wellbeing_K7, na.rm = TRUE),
+    mean_peer = mean(K7_ResilFriends, na.rm = TRUE),
+    mean_ses = mean(ses, na.rm = TRUE),
+    pct_female = mean(sex == "Female", na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+```
+
+# H2b: internalizing symptoms
+
+```{r}
+# K7 Internalizing als Baseline-Wert pro Person
+baseline_int <- dat %>%
+  filter(wave == "K7") %>%
+  select(person_id, internalizing_K7 = internalizing)
+# überprüfen, dass jede Person nur eine Zeile braucht
+baseline_int %>% count(person_id) %>% filter(n > 1)
+
+# an Long-Datensatz anhängen
+dat_rq2_int <- dat %>%
+  left_join(baseline_int, by = "person_id")
+
+nrow(dat_rq2_int)
+
+
+# Nur vollständige Fälle für dieses Modell
+dat_rq2_int_k9 <- dat_rq2_int %>%
+  filter(wave == "K9") %>%
+  filter(
+    !is.na(internalizing),
+    !is.na(internalizing_K7),
+    !is.na(K7_ResilFriends),
+    !is.na(K9_orientation),
+    !is.na(sex),
+    !is.na(ses))%>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+  
+
+# Internalizing Symptoms und Peersupport zentrieren ### -> vielleicht in ein separaten Chunk tun
+dat_rq2_int_k9 <- dat_rq2_int_k9 %>%
+  mutate(
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends),
+    int_K7_c = internalizing_K7 - mean(internalizing_K7)
+  )
+
+# Stichprobe kontrollieren
+nrow(dat_rq2_int_k9)
+table(dat_rq2_int_k9$K9_orientation)
+
+
+# Modell 1: Haupteffekt von Peer Support
+model_rq2_int_base <- lm(
+  internalizing ~ int_K7_c + peer_c + K9_orientation + sex + ses_c,
+  data = dat_rq2_int_k9
+)
+
+summary(model_rq2_int_base)
+
+
+# Modell 2: Moderation durch sexuelle Orientierung
+
+model_rq2_int_mod <- lm(
+  internalizing ~ int_K7_c + peer_c * K9_orientation + sex + ses_c,
+  data = dat_rq2_int_k9
+)
+
+summary(model_rq2_int_mod)
+
+# COhens D erhalten
+install.packages("parameters"); library(parameters)
+parameters::standardize_parameters(model_rq2_int_mod, method = "refit")
+
+# Konfidenzintervalle
+emtrends(
+  model_rq2_int_mod,
+  ~ K9_orientation,
+  var = "peer_c"
+) |>
+  summary(infer = c(TRUE, TRUE))
+```
+## Plot
+
+```{r}
+library(patchwork)
+
+# Anzahl Personen pro Messwert und Gruppe (ab 2.33)
+obs <- dat_rq2_int_k9 %>%
+  filter(K7_ResilFriends >= 2.33) %>%
+  mutate(peer = round(K7_ResilFriends, 2)) %>%
+  count(peer, K9_orientation) %>%
+  tidyr::complete(peer, K9_orientation, fill = list(n = 0))
+
+# Hauptplot (ganze Skala, ohne x-Achsenbeschriftung)
+p_main <- ggplot(
+  pred_df_int,
+  aes(x = peer, y = emmean, color = K9_orientation,
+      fill = K9_orientation, linetype = K9_orientation)
+) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.12, color = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  coord_cartesian(xlim = c(2.2, 4.1), ylim = c(1, 5)) +
+  labs(y = "Predicted internalizing at K9",
+       color = "Sexual orientation", fill = "Sexual orientation",
+       linetype = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text    = element_text(size = 9, color = "black"))
+
+# Zahlenzeile
+p_n <- ggplot(obs, aes(x = peer, y = K9_orientation, label = n, color = K9_orientation)) +
+  geom_text(size = 3) +
+  scale_color_manual(values = cols, guide = "none") +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  scale_y_discrete(limits = rev) +
+  coord_cartesian(xlim = c(2.2, 4.1)) +
+  labs(x = "Peer support at K7", y = NULL) +
+  theme_classic(base_size = 10) +
+  theme(axis.text         = element_text(size = 9, color = "black"),
+        axis.line.y       = element_blank(),
+        axis.ticks.y      = element_blank())
+
+p_int_int <- (p_main / p_n +
+  plot_layout(heights = c(5, 1), guides = "collect")) &
+  theme(legend.position  = "bottom",
+        legend.title     = element_text(size = 10),
+        legend.text      = element_text(size = 9),
+        legend.key.width = unit(1.2, "cm"))
+
+p_int_int
+
+ggsave("abb_h2b_internalizing.png", p_int_int,
+       width = 14, height = 10, units = "cm", dpi = 300)
+```
+## Testvoraussetzungen
+
+```{r}
+# 1. Normality of Residuals
+
+# Plot standardized residuals
+par(mfrow = c(1, 2))
+
+qqnorm(
+  rstandard(model_rq2_int_mod),
+  main = "Q-Q Plot: Residuals"
+)
+qqline(rstandard(model_rq2_int_mod), col = "red")
+
+hist(
+  rstandard(model_rq2_int_mod),
+  main = "Distribution of Residuals",
+  xlab = "Standardized Residuals"
+)
+
+par(mfrow = c(1, 1))
+
+
+# 2. Linearity
+
+# Check linearity of continuous predictors in the base model
+car::crPlots(
+  model_rq2_int_base,
+  terms = ~ int_K7_c + peer_c + ses_c
+)
+
+
+# 3. Homoscedasticity
+
+# Extract fitted values and residuals from the moderation model
+dat_diag_rq2_int <- data.frame(
+  fitted = fitted(model_rq2_int_mod),
+  residual = residuals(model_rq2_int_mod)
+)
+
+# Plot residuals against fitted values
+ggplot(
+  dat_diag_rq2_int,
+  aes(x = fitted, y = residual)
+) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+
+# 4. Outliers
+
+# Calculate standardized residuals
+std_res_int <- rstandard(model_rq2_int_mod)
+
+# Count observations with absolute standardized residuals above 3
+sum(abs(std_res_int) > 3)
+
+# Identify unusual observations
+which(abs(std_res_int) > 3)
+
+
+# 5. Influential Observations
+
+# Calculate Cook's distance
+cd_int <- cooks.distance(model_rq2_int_mod)
+
+# Plot Cook's distance
+plot(
+  cd_int,
+  type = "h",
+  main = "Cook's Distance: Internalizing Symptoms",     # EINE PERSON STICHT SEHR STARK HERAUS.. ÜBERPRÜFEN, SENSITIVITÄTSANALYSE?
+  xlab = "Observation",
+  ylab = "Cook's Distance"
+)
+
+# Display the 10 largest Cook's distances
+head(sort(cd_int, decreasing = TRUE), 10)
+
+# Count observations exceeding the heuristic threshold
+sum(cd_int > 4 / nobs(model_rq2_int_mod))
+
+# 7. Multicollinearity
+# Check variance inflation factors for the base model
+car::vif(model_rq2_int_base)
+# Check variance inflation factors for the moderation model
+car::vif(model_rq2_int_mod)
+
+
+# Sensitivity Analyses
+# Identify the three most influential observations
+top3_int <- order(cd_int, decreasing = TRUE)[
+  seq_len(min(3, length(cd_int)))
+]
+
+# Refit the model after excluding the three most influential cases
+model_int_sens_a <- update(
+  model_rq2_int_mod,
+  data = model.frame(model_rq2_int_mod)[-top3_int, , drop = FALSE]
+)
+
+# Identify observations exceeding Cook's distance threshold
+keep_int <- cd_int <= 4 / nobs(model_rq2_int_mod)
+
+# Count excluded observations
+sum(!keep_int)
+
+# Calculate the percentage of excluded observations
+round(mean(!keep_int) * 100, 1)
+
+# Refit the model after excluding observations above the threshold
+model_int_sens_b <- update(
+  model_rq2_int_mod,
+  data = model.frame(model_rq2_int_mod)[keep_int, , drop = FALSE]
+)
+
+# Compare regression coefficients across models -> # grosse Änderung aufgrund eines Falls
+cbind(
+  full = coef(model_rq2_int_mod),
+  without_top3 = coef(model_int_sens_a),
+  without_4n = coef(model_int_sens_b)
+)
+
+# Compare 95% confidence intervals
+confint(model_rq2_int_mod)
+confint(model_int_sens_a)
+confint(model_int_sens_b)
+```
+
+### Missing Data Analyse aufgrund complete case analysis
+
+```{r}
+# select all variables
+dat_missing_rq2_int <- dat_rq2_int %>%
+  filter(wave == "K9") %>%
+  mutate(
+    complete_rq2 = complete.cases(
+      internalizing, internalizing_K7, K7_ResilFriends,
+      K9_orientation, sex, ses
+    )
+  )
+
+# summarize
+dat_missing_rq2_int %>%
+  summarise(
+    N_total = n(),
+    missing_wb_K9 = sum(is.na(internalizing)),
+    missing_wb_K7 = sum(is.na(internalizing_K7)),
+    missing_peer = sum(is.na(K7_ResilFriends)),
+    missing_orientation = sum(is.na(K9_orientation)),
+    missing_sex = sum(is.na(sex)),
+    missing_ses = sum(is.na(ses)),
+    N_complete = sum(complete_rq2),
+    N_incomplete = sum(!complete_rq2),
+    percent_complete = round(mean(complete_rq2) * 100, 1)
+  )
+
+# show included and excluded participants separate per variable
+dat_missing_rq2_int %>%
+  group_by(K9_orientation, complete_rq2) %>%
+  summarise(
+    N = n(),
+    mean_int_K7 = mean(internalizing_K7, na.rm = TRUE),
+    mean_peer = mean(K7_ResilFriends, na.rm = TRUE),
+    mean_ses = mean(ses, na.rm = TRUE),
+    pct_female = mean(sex == "Female", na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+```
