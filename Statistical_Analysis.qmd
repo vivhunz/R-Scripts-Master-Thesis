@@ -1,0 +1,2442 @@
+---
+title: "analysis"
+format: html
+editor: visual
+---
+
+# Analysis
+
+## Install packages
+
+```{r}
+install.packages("lmerTest")
+install.packages("performance")
+install.packages("emmeans")
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("patchwork")
+install.packages("influence.ME")
+install.packages("parameters")
+install.packages("car")
+install.packages("ggplot")
+install.packages("lme4")
+install.packages("readr")
+install.packages("ggplotify")
+```
+
+## Load packages
+
+```{r}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(performance)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(influence.ME)
+library(parameters)
+library(car)
+library(readr)
+library(ggplot)
+library(lme4)
+library(ggplot2)
+library(ggplotify)
+
+```
+
+# Load data
+
+```{r}
+dat <- read_delim("/Users/vivianhunziker/Desktop/data_04.11.2026.csv")
+
+
+
+# SEX -> MUSS NOCH IM ANDEREN DOK GEMACHT WERDEN... 
+dat <- dat %>%
+  rename(sex = ADR_GenderChild) %>%
+  mutate(
+    sex = na_if(sex, -1),
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female"))
+  )
+
+table(dat$sex, useNA = "ifany")   # Kontrolle
+
+# SES
+dat <- dat %>%
+  rename(ses = `K5#6_ISEImax`) %>%
+  mutate(ses = na_if(ses, -1))   # -1 = fehlend -> NA
+```
+
+# H1
+
+## H1a: well-being
+
+```{r}
+# Filter dataset
+dat_rq1_wb <- dat %>%
+  filter( 
+    !is.na(K9_orientation), !is.na(sex), !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+
+# model zero
+m0_wb <- lmer(
+  wellbeing ~ 1 + (1 | person_id),
+  data = dat_rq1_wb,
+  REML = TRUE
+)
+
+summary(m0_wb)
+icc(m0_wb)
+
+# main model
+m3_wb <- lmer(
+  wellbeing ~ wave * K9_orientation + sex + ses_c +
+    (1 | person_id),
+  data = dat_rq1_wb,
+  REML = TRUE
+)
+
+summary(m3_wb)
+
+confint(m3_wb, parm = "beta_", method = "Wald")
+
+# 1. Omnibus tests
+anova(m3_wb)
+
+# 2. Estimated marginal means
+emm_wb <- emmeans(m3_wb, ~ K9_orientation | wave)
+summary(emm_wb, infer = c(TRUE, FALSE))
+
+# 3. Group differences within waves
+diff_wb <- pairs(emm_wb)
+summary(diff_wb, infer = c(TRUE, FALSE))
+
+# 4. Standardized group differences
+
+ # existing group contrasts
+diff_wb_ci <- as.data.frame(summary(diff_wb, infer = c(TRUE, FALSE),adjust = "none"))
+ #Calculate the model-implied total standard deviation
+vc_wb <- as.data.frame(VarCorr(m3_wb))
+sd_total_wb <- sqrt(sum(vc_wb$vcov))
+# Calculate standardized group differences
+diff_wb_ci$d <- diff_wb_ci$estimate / sd_total_wb
+# Calculate approximate standardized confidence interval limits
+diff_wb_ci$d_low <- diff_wb_ci$asymp.LCL / sd_total_wb
+diff_wb_ci$d_up <- diff_wb_ci$asymp.UCL / sd_total_wb
+
+diff_wb_ci
+
+# 5. Changes in group differences across waves
+change_wb <- contrast(
+  diff_wb,
+  method = "revpairwise",
+  by = NULL
+)
+summary(change_wb, infer = c(TRUE, TRUE), adjust = "none")
+
+# 6. Within-group changes across assessment waves
+
+# well-being at each wave within each orientation group
+emm_wb_time <- emmeans(
+  m3_wb,
+  ~ wave | K9_orientation
+)
+
+# Compare waves within each orientation group
+time_diff_wb <- pairs(emm_wb_time)
+
+# within-group changes and 95% confidence intervals
+summary(time_diff_wb, infer = c(TRUE, FALSE), adjust = "none")
+
+
+# Übersicht Participants in this model 
+# Number of participants and observations in the fitted model
+model_data_wb <- dat_rq1_wb[
+  as.integer(rownames(model.frame(m3_wb))), 
+]
+
+#  Unique participants by sexual orientation
+model_data_wb %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants") %>%
+  bind_rows(
+    tibble(
+      K9_orientation = "Total",
+      N_participants = n_distinct(model_data_wb$person_id)
+    )
+  )
+
+```
+
+### Plot
+
+```{r}
+
+age_map <- c(K7 = 17, K8 = 20, K9 = 24)   # age per wave
+pd <- position_dodge(width = 0.5)          
+ 
+emm_df <- as.data.frame(emm_wb)
+emm_df$age <- unname(age_map[as.character(emm_df$wave)])
+ 
+pd <- position_dodge(width = 0.25)
+
+p_means <- ggplot(
+  emm_df,
+  aes(
+    x = wave,
+    y = emmean,
+    group = K9_orientation,
+    linetype = K9_orientation,
+    shape = K9_orientation
+  )
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(
+    aes(ymin = asymp.LCL, ymax = asymp.UCL),
+    width = 0.1,
+    linewidth = 0.5,
+    linetype = "solid",
+    position = pd
+  ) +
+  scale_x_discrete(
+    limits = c("K7", "K8", "K9"),
+    labels = c("K7", "K8", "K9")
+  ) +
+  scale_y_continuous(
+    limits = c(2.5, 3.5),
+    breaks = seq(2.5, 3.5, by = 0.25)
+  ) +
+  labs(
+    x = "Assessment wave",
+    y = "Estimated Wellbeing",
+    linetype = "Sexual orientation",
+    shape = "Sexual orientation"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+     axis.title = element_text(size = 11),
+  axis.text = element_text(size = 10, color = "black"),
+  legend.title = element_text(size = 10),
+  legend.text = element_text(size = 10),
+  legend.position = "bottom",
+  legend.key.width = unit(1.2, "cm")
+  )
+
+print(p_means)
+
+```
+
+### Model assumptions H1a
+
+```{r}
+# create function for RQ 1 model assumptions
+check_mixed_assumptions <- function(model, outcome_name) {
+
+  # Use REML for final model diagnostics
+  model <- update(model, REML = TRUE)
+
+  # Extract model data
+  dat_diag <- model.frame(model) %>%
+    mutate(
+      fitted = fitted(model),
+      residual = residuals(model),
+      std_residual = residuals(model, scaled = TRUE)
+    )
+
+  # Random intercepts
+  ri <- ranef(model)$person_id[, "(Intercept)"]
+
+
+  # 1. Normality
+
+  # Level-1 residuals
+  p_qq_l1 <- ggplot(
+    data.frame(std_residual = dat_diag$std_residual),
+    aes(sample = std_residual)
+  ) +
+    stat_qq(alpha = 0.4) +
+    stat_qq_line(color = "red") +
+    labs(
+      title = "Level-1 Residuals",
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal()
+
+  # Random intercepts
+  p_qq_l2 <- ggplot(
+    data.frame(random_intercept = as.numeric(ri)),
+    aes(sample = random_intercept)
+  ) +
+    stat_qq(alpha = 0.4) +
+    stat_qq_line(color = "red") +
+    labs(
+      title = "Random Intercepts",
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal()
+
+
+  # 2. Linearity: SES
+
+  p_ses <- ggplot(
+    dat_diag,
+    aes(x = ses_c, y = residual)
+  ) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(
+      method = "loess",
+      se = FALSE,
+      color = "red"
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed"
+    ) +
+    labs(
+      title = paste(outcome_name, "- Residuals vs. SES"),
+      x = "SES (centered)",
+      y = "Residuals"
+    ) +
+    theme_minimal()
+
+  print(p_ses)
+
+
+  # 3. Homoscedacity
+
+  # Residuals vs. fitted
+  p_fitted <- ggplot(
+    dat_diag,
+    aes(x = fitted, y = residual)
+  ) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(
+      method = "loess",
+      se = FALSE,
+      color = "red"
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed"
+    ) +
+    labs(
+      title = paste(outcome_name, "- Residuals vs. Fitted"),
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme_minimal()
+
+  print(p_fitted)
+
+
+  # Residuals by wave and orientation
+  p_wave <- ggplot(
+    dat_diag,
+    aes(
+      x = wave,
+      y = residual,
+      fill = K9_orientation
+    )
+  ) +
+    geom_boxplot(
+      position = position_dodge(width = 0.8),
+      alpha = 0.5,
+      outlier.shape = NA
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed"
+    ) +
+    labs(
+      title = paste(outcome_name, "- Residuals by Wave"),
+      x = "Assessment Wave",
+      y = "Residuals",
+      fill = "Sexual Orientation"
+    ) +
+    theme_minimal()
+
+  print(p_wave)
+
+
+  # 4. Level-1 Outliers
+
+  outliers_L1 <- dat_diag %>%
+    filter(abs(std_residual) > 3) %>%
+    arrange(desc(abs(std_residual)))
+
+  cat("\nLEVEL-1 OUTLIERS:", outcome_name, "\n")
+  cat("Number:", nrow(outliers_L1), "\n")
+
+  print(outliers_L1)
+
+
+  # 5. Level-2 Outliers
+
+  dat_ri <- data.frame(
+    person_id = rownames(ranef(model)$person_id),
+    random_intercept = as.numeric(ri)
+  ) %>%
+    mutate(
+      z_intercept = as.numeric(scale(random_intercept))
+    )
+
+  outliers_L2 <- dat_ri %>%
+    filter(abs(z_intercept) > 3) %>%
+    arrange(desc(abs(z_intercept)))
+
+  cat("\nLEVEL-2 OUTLIERS:", outcome_name, "\n")
+  cat("Number:", nrow(outliers_L2), "\n")
+
+  print(outliers_L2)
+
+
+  # 6. Influential Participants
+
+  infl <- influence(
+    model,
+    group = "person_id"
+  )
+
+  cooks <- cooks.distance(infl)
+
+ # Cook's Distance plot
+  p_cooks <- ggplot(
+    data.frame(
+      participant = seq_along(cooks),
+      cooks_distance = as.numeric(cooks)
+    ),
+    aes(x = participant, y = cooks_distance)
+  ) +
+    geom_segment(
+      aes(xend = participant, yend = 0)
+    ) +
+    labs(
+      title = "Cook's Distance",
+      x = "Participant",
+      y = "Cook's Distance"
+    ) +
+    theme_minimal()
+
+  cat("\nTOP 10 COOK'S DISTANCES:", outcome_name, "\n")
+  print(head(sort(cooks, decreasing = TRUE), 10))
+
+
+  # 7. Model Checks
+
+  cat("\nCONVERGENCE:\n")
+  print(performance::check_convergence(model))
+
+  cat("\nSINGULARITY:\n")
+  print(performance::check_singularity(model))
+
+  cat("\nMULTICOLLINEARITY:\n")
+  print(performance::check_collinearity(model))
+
+# 8. Combine diagnostic plots
+diagnostic_panel <-
+  (p_qq_l1 | p_qq_l2) /
+  (p_ses | p_fitted) /
+  (p_wave | p_cooks) +
+  plot_annotation(
+    title = paste("Model Diagnostics -", outcome_name)
+  ) &
+  theme(
+    text = element_text(size = 13),
+    plot.title = element_text(size = 15, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# RETURN RESULTS
+
+invisible(list(
+  model = model,
+  diagnostic_data = dat_diag,
+  outliers_L1 = outliers_L1,
+  outliers_L2 = outliers_L2,
+  cooks_distance = cooks,
+  influential_participants = infl,
+
+  plots = list(
+    qq_l1 = p_qq_l1,
+    qq_l2 = p_qq_l2,
+    ses = p_ses,
+    fitted = p_fitted,
+    wave = p_wave,
+    cooks = p_cooks
+  ),
+
+  diagnostic_panel = diagnostic_panel
+))
+}
+
+# H1a: Model assumptions 
+diag_wb <- check_mixed_assumptions(
+  model = m3_wb,
+  outcome_name = "Well-being"
+)
+
+# Display complete diagnostic panel
+diag_wb$diagnostic_panel
+
+ggsave(
+  filename = "Diagnostics_H1a.pdf",
+  plot = diag_wb$diagnostic_panel,
+  width = 10,
+  height = 12,
+  units = "in"
+)
+
+# Inspect results
+diag_wb$outliers_L1
+diag_wb$outliers_L2
+
+# Top 10 influential participants
+head(sort(diag_wb$cooks_distance, decreasing = TRUE), 10)
+
+```
+
+### Sensitivity analysis
+
+```{r}
+# H1a – SENSITIVITY ANALYSIS
+# Alternative sexual attraction classification (Ever-SMY)
+# Same analytical sample as the main analysis
+
+
+# Create alternative sexual attraction classification
+# Participants are classified as non-heterosexual if they reported non-heterosexual attraction at any available wave.
+
+orientation_person <- dat %>%
+  group_by(person_id) %>%
+  summarise(
+    orientation_ever = case_when(
+      any(
+        K7_orientation == "Non-heterosexual" |
+        K8_orientation == "Non-heterosexual" |
+        K9_orientation == "Non-heterosexual",
+        na.rm = TRUE
+      ) ~ "Non-heterosexual",
+
+      any(
+        K7_orientation == "Heterosexual" |
+        K8_orientation == "Heterosexual" |
+        K9_orientation == "Heterosexual",
+        na.rm = TRUE
+      ) ~ "Heterosexual",
+
+      TRUE ~ NA_character_
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    orientation_ever = factor(
+      orientation_ever,
+      levels = c("Heterosexual", "Non-heterosexual")
+    )
+  )
+
+
+# Prepare sensitivity analysis dataset
+
+# Keep the same participants and observations
+# as in the main analysis.
+
+dat_rq1_wb_ever <- dat_rq1_wb %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(orientation_person, by = "person_id")
+
+# Verify that no participants have missing Ever-SMY status
+stopifnot(!anyNA(dat_rq1_wb_ever$orientation_ever))
+
+
+# Compare classifications at participant level
+classification_person <- dat_rq1_wb_ever %>%
+  distinct(person_id, K9_orientation, orientation_ever)
+
+# Cross-tabulation of classifications
+classification_table <- table(
+  K9 = classification_person$K9_orientation,
+  Ever_SMY = classification_person$orientation_ever
+)
+
+classification_table
+
+# Number of participants in each group
+table(classification_person$K9_orientation)
+table(classification_person$orientation_ever)
+
+
+
+# Fit sensitivity model
+
+model_rq1_wb_ever <- lmer(
+  wellbeing ~ wave * orientation_ever +
+    sex + ses_c + (1 | person_id),
+  data = dat_rq1_wb_ever,
+  REML = TRUE
+)
+
+summary(model_rq1_wb_ever)
+anova(model_rq1_wb_ever)
+
+
+
+# Compare coefficients and 95% confidence intervals
+
+# Extract coefficients
+main <- fixef(m3_wb)
+sens <- fixef(model_rq1_wb_ever)
+
+# Extract 95% confidence intervals
+ci_main <- confint(m3_wb, parm = "beta_", method = "Wald")
+ci_sens <- confint(
+  model_rq1_wb_ever,
+  parm = "beta_",
+  method = "Wald"
+)
+
+# Select group difference at K7 and interaction coefficients
+terms_main <- c(
+  "K9_orientationNon-heterosexual",
+  "waveK8:K9_orientationNon-heterosexual",
+  "waveK9:K9_orientationNon-heterosexual"
+)
+
+terms_sens <- c(
+  "orientation_everNon-heterosexual",
+  "waveK8:orientation_everNon-heterosexual",
+  "waveK9:orientation_everNon-heterosexual"
+)
+
+# Create comparison table
+comparison <- data.frame(
+  Parameter = c(
+    "Group difference at K7 (SMY - heterosexual)",
+    "Change in group difference (K8 vs. K7)",
+    "Change in group difference (K9 vs. K7)"
+  ),
+  Main = sprintf(
+    "%.3f [%.3f, %.3f]",
+    main[terms_main],
+    ci_main[terms_main, 1],
+    ci_main[terms_main, 2]
+  ),
+  Ever_SMY = sprintf(
+    "%.3f [%.3f, %.3f]",
+    sens[terms_sens],
+    ci_sens[terms_sens, 1],
+    ci_sens[terms_sens, 2]
+  ),
+  row.names = NULL
+)
+
+names(comparison) <- c(
+  "Parameter",
+  "Main analysis",
+  "Ever-SMY classification"
+)
+
+print(comparison, row.names = FALSE)
+
+
+# Compare omnibus interaction tests
+
+anova_main <- as.data.frame(anova(m3_wb))
+anova_sens <- as.data.frame(anova(model_rq1_wb_ever))
+
+interaction_comparison <- data.frame(
+  Model = c("Main analysis", "Ever-SMY classification"),
+  F = round(c(
+    anova_main["wave:K9_orientation", "F value"],
+    anova_sens["wave:orientation_ever", "F value"]
+  ), 2),
+  df1 = c(
+    anova_main["wave:K9_orientation", "NumDF"],
+    anova_sens["wave:orientation_ever", "NumDF"]
+  ),
+  df2 = round(c(
+    anova_main["wave:K9_orientation", "DenDF"],
+    anova_sens["wave:orientation_ever", "DenDF"]
+  ), 1)
+)
+
+interaction_comparison
+
+```
+
+## H1b: internalizing
+
+```{r}
+# Filter datased  -> HIER NOCH SCHREIBEN WIESO SES MEAN-CENTERED UND / 10 GERECHNET WURDE.. 
+dat_rq1_int <- dat %>%
+  filter( !is.na(K9_orientation), !is.na(sex), !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+
+# model zero
+m0_int <- lmer(
+  internalizing ~ 1 + (1 | person_id),
+  data = dat_rq1_int,
+  REML = TRUE
+)
+
+summary(m0_int)
+icc(m0_int)
+
+# main model
+m3_int <- lmer(
+  internalizing ~ wave * K9_orientation + sex + ses_c +
+    (1 | person_id),
+  data = dat_rq1_int,
+  REML = TRUE
+)
+
+summary(m3_int)
+
+
+# 1. Omnibus tests
+anova(m3_int) #### SEX WAR SIGNIFIKANT, WAS BEDEUTET DAS? ANSCHAUEN
+
+
+# 2. Estimated marginal means
+emm_int <- emmeans(m3_int, ~ K9_orientation | wave)
+summary(emm_int, infer = c(TRUE, FALSE))
+
+
+# 3. Group differences within waves
+diff_int <- pairs(emm_int)
+summary(diff_int, infer = c(TRUE, FALSE))
+
+
+# 4. Standardized group differences
+
+# Extract the existing group contrasts
+diff_int_ci <- as.data.frame(summary(diff_int, infer = c(TRUE, FALSE), adjust = "none"))
+
+# Calculate the model-implied total standard deviation
+vc_int <- as.data.frame(VarCorr(m3_int))
+sd_total_int <- sqrt(sum(vc_int$vcov))
+
+# Calculate standardized group differences
+diff_int_ci$d <- diff_int_ci$estimate / sd_total_int
+
+# Calculate approximate standardized confidence interval limits
+diff_int_ci$d_low <- diff_int_ci$asymp.LCL / sd_total_int
+diff_int_ci$d_up <- diff_int_ci$asymp.UCL / sd_total_int
+
+diff_int_ci
+
+
+# 5. Changes in group differences across waves
+change_int <- contrast(
+  diff_int,
+  method = "revpairwise",
+  by = NULL
+)
+
+summary(change_int, infer = c(TRUE, TRUE), adjust = "none")
+
+
+# 6. Within-group changes across assessment waves
+# Estimate internalizing symptoms at each wave within each orientation group
+emm_int_time <- emmeans(m3_int, ~ wave | K9_orientation)
+
+# Compare waves within each orientation group
+time_diff_int <- pairs(emm_int_time)
+
+# Display within-group changes and 95% confidence intervals
+summary(time_diff_int, infer = c(TRUE, FALSE), adjust = "none")
+
+
+# Übersicht über Teilnehmende
+model_data_int <- dat_rq1_int[
+  match(rownames(model.frame(m3_int)), rownames(dat_rq1_int)),
+  , drop = FALSE
+]
+
+model_data_int %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants")
+```
+
+### Plot
+
+```{r}
+age_map <- c(K7 = 17, K8 = 20, K9 = 24)   # age per wave
+pd <- position_dodge(width = 0.5) 
+
+emm_df_int <- as.data.frame(emm_int)
+emm_df_int$age <- unname(age_map[as.character(emm_df_int$wave)])
+
+pd <- position_dodge(width = 0.25)
+
+p_means_int <- ggplot(
+  emm_df_int,
+  aes(
+    x = wave,
+    y = emmean,
+    group = K9_orientation,
+    linetype = K9_orientation,
+    shape = K9_orientation
+  )
+) +
+  geom_line(linewidth = 0.6, position = pd) +
+  geom_point(size = 2.2, position = pd) +
+  geom_errorbar(
+    aes(ymin = asymp.LCL, ymax = asymp.UCL),
+    width = 0.1,
+    linewidth = 0.5,
+    linetype = "solid",
+    position = pd
+  ) +
+  scale_x_discrete(
+    limits = c("K7", "K8", "K9"),
+    labels = c("K7", "K8", "K9")
+  ) +
+  scale_y_continuous(
+    limits = c(1.5, 3.5),
+    breaks = seq(1.5, 3.5, by = 0.5)
+  ) +
+  labs(
+    x = "Assessment wave",
+    y = "Estimated Internalizing symptoms",
+    linetype = "Sexual orientation",
+    shape = "Sexual orientation"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10, color = "black"),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.key.width = unit(1.2, "cm")
+  )
+
+print(p_means_int)
+ 
+```
+
+### Model assumptions
+
+```{r}
+# H1b: Model assumptions 
+diag_int <- check_mixed_assumptions(
+  model = m3_int,
+  outcome_name = "Internalizing symptoms"
+)
+
+# Display complete diagnostic panel
+diag_int$diagnostic_panel
+
+ggsave(
+  filename = "Diagnostics_H1b.pdf",
+  plot = diag_int$diagnostic_panel,
+  width = 10,
+  height = 12,
+  units = "in"
+)
+
+# look at results
+diag_int$outliers_L1
+diag_int$outliers_L2
+
+# Top 10 influential participants
+head(sort(diag_int$cooks_distance, decreasing = TRUE), 10)
+```
+
+### sensitivity analysis
+
+```{r}
+# H1b – SENSITIVITY ANALYSIS
+# Alternative sexual attraction classification (Ever-SMY)
+# Same analytical sample as the main analysis
+
+# Prepare sensitivity analysis dataset
+
+dat_rq1_int_ever <- dat_rq1_int %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(
+    orientation_person %>%
+      select(person_id, orientation_ever),
+    by = "person_id"
+  )
+
+# Verify that no Ever-SMY classifications are missing
+stopifnot(!anyNA(dat_rq1_int_ever$orientation_ever))
+
+
+
+# Compare classifications at participant level
+
+
+# Count each participant only once.
+
+classification_person_int <- dat_rq1_int_ever %>%
+  distinct(person_id, K9_orientation, orientation_ever)
+
+# Cross-tabulation
+classification_table_int <- table(
+  K9 = classification_person_int$K9_orientation,
+  Ever_SMY = classification_person_int$orientation_ever
+)
+
+classification_table_int
+
+# Number of participants in each group
+table(classification_person_int$K9_orientation)
+table(classification_person_int$orientation_ever)
+
+
+
+# Fit sensitivity model
+
+
+model_rq1_int_ever <- lmer(
+  internalizing ~ wave * orientation_ever +
+    sex + ses_c + (1 | person_id),
+  data = dat_rq1_int_ever,
+  REML = TRUE
+)
+
+summary(model_rq1_int_ever)
+anova(model_rq1_int_ever)
+
+
+
+# Compare coefficients and 95% confidence intervals
+
+
+# Extract fixed-effect coefficients
+main_int <- fixef(m3_int)
+sens_int <- fixef(model_rq1_int_ever)
+
+# Extract 95% confidence intervals
+ci_main_int <- confint(
+  m3_int,
+  parm = "beta_",
+  method = "Wald"
+)
+
+ci_sens_int <- confint(
+  model_rq1_int_ever,
+  parm = "beta_",
+  method = "Wald"
+)
+
+# Select group difference at K7 and interaction coefficients
+terms_main_int <- c(
+  "K9_orientationNon-heterosexual",
+  "waveK8:K9_orientationNon-heterosexual",
+  "waveK9:K9_orientationNon-heterosexual"
+)
+
+terms_sens_int <- c(
+  "orientation_everNon-heterosexual",
+  "waveK8:orientation_everNon-heterosexual",
+  "waveK9:orientation_everNon-heterosexual"
+)
+
+# Create comparison table
+comparison_int <- data.frame(
+  Parameter = c(
+    "Group difference at K7 (SMY - heterosexual)",
+    "Change in group difference (K8 vs. K7)",
+    "Change in group difference (K9 vs. K7)"
+  ),
+  Main = sprintf(
+    "%.3f [%.3f, %.3f]",
+    main_int[terms_main_int],
+    ci_main_int[terms_main_int, 1],
+    ci_main_int[terms_main_int, 2]
+  ),
+  Ever_SMY = sprintf(
+    "%.3f [%.3f, %.3f]",
+    sens_int[terms_sens_int],
+    ci_sens_int[terms_sens_int, 1],
+    ci_sens_int[terms_sens_int, 2]
+  ),
+  row.names = NULL
+)
+
+names(comparison_int) <- c(
+  "Parameter",
+  "Main analysis",
+  "Ever-SMY classification"
+)
+
+print(comparison_int, row.names = FALSE)
+
+
+
+# Compare omnibus interaction tests
+
+
+anova_main_int <- as.data.frame(anova(m3_int))
+anova_sens_int <- as.data.frame(anova(model_rq1_int_ever))
+
+interaction_comparison_int <- data.frame(
+  Model = c(
+    "Main analysis",
+    "Ever-SMY classification"
+  ),
+  F = round(c(
+    anova_main_int["wave:K9_orientation", "F value"],
+    anova_sens_int["wave:orientation_ever", "F value"]
+  ), 2),
+  df1 = c(
+    anova_main_int["wave:K9_orientation", "NumDF"],
+    anova_sens_int["wave:orientation_ever", "NumDF"]
+  ),
+  df2 = round(c(
+    anova_main_int["wave:K9_orientation", "DenDF"],
+    anova_sens_int["wave:orientation_ever", "DenDF"]
+  ), 1)
+)
+
+interaction_comparison_int
+
+```
+
+#H2 
+## H2a: well-being
+
+```{r}
+# K7 Well-being as baseline for each participant
+baseline_wb <- dat %>%
+  filter(wave == "K7") %>%
+  select(person_id, wellbeing_K7 = wellbeing)
+
+# join 
+dat_rq2_wb <- dat %>%
+  left_join(baseline_wb, by = "person_id")
+
+nrow(dat_rq2_wb)
+
+# CHECK if a participant needs more than one row
+baseline_wb %>% count(person_id) %>% filter(n > 1)
+
+# select complete cases
+dat_rq2_wb_k9 <- dat_rq2_wb %>%
+  filter(wave == "K9") %>%
+  filter(
+    !is.na(wellbeing),
+    !is.na(wellbeing_K7),
+    !is.na(K7_ResilFriends),
+    !is.na(K9_orientation),
+    !is.na(sex),
+    !is.na(ses)) %>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+
+table(dat_rq2_wb_k9$K9_orientation)
+
+# center inernalizing and K7_ResilFriends ### -> vielleicht in ein separaten Chunk tun
+dat_rq2_wb_k9 <- dat_rq2_wb_k9 %>%
+  mutate(
+    wb_K7_c = wellbeing_K7 -
+      mean(wellbeing_K7, na.rm = TRUE),
+
+    peer_c = K7_ResilFriends -
+      mean(K7_ResilFriends, na.rm = TRUE)
+  )
+
+# Base model
+model_rq2_wb_base <- lm(
+  wellbeing ~ wb_K7_c +
+    peer_c + K9_orientation + sex + ses_c,
+  data = dat_rq2_wb_k9
+)
+
+summary(model_rq2_wb_base)
+
+
+# Interactionmodel
+model_rq2_wb_mod <- lm(
+  wellbeing ~ wb_K7_c +
+    peer_c * K9_orientation + sex + ses_c,
+  data = dat_rq2_wb_k9
+)
+
+summary(model_rq2_wb_mod)
+
+# Cohens D 
+parameters::standardize_parameters(model_rq2_wb_mod, method = "refit")
+
+# 95%-CI
+confint(model_rq2_wb_base)
+confint(model_rq2_wb_mod)
+
+
+# 95%-CI SMY slope
+confint(
+  emmeans::emtrends(
+    model_rq2_wb_mod,
+    ~ K9_orientation,
+    var = "peer_c"
+  )
+  )
+
+# Modellgüte
+summary(model_rq2_wb_base)$r.squared
+summary(model_rq2_wb_mod)$r.squared
+
+# adjusted R²
+summary(model_rq2_wb_base)$adj.r.squared
+summary(model_rq2_wb_mod)$adj.r.squared
+
+# additionally explained value 
+delta_R2 <-
+  summary(model_rq2_wb_mod)$r.squared -
+  summary(model_rq2_wb_base)$r.squared
+
+delta_R2
+
+
+# übersicht über Teilnehmende
+model_data_h2a <- dat_rq2_wb_k9[
+  match(rownames(model.frame(model_rq2_wb_mod)), rownames(dat_rq2_wb_k9)),
+  , drop = FALSE
+]
+
+model_data_h2a %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants")
+```
+
+### Plot
+
+```{r}
+cols <- c("Heterosexual"     = "#D55E00",
+          "Non-heterosexual" = "#0072B2")
+
+# Mean value used to center peer_c (data from H2a!)
+peer_mean_wb <- mean(dat_rq2_wb_k9$K7_ResilFriends, na.rm = TRUE)
+peer_grid_wb <- seq(2.33, 4, length.out = 50)
+
+pred_wb <- emmeans(
+  model_rq2_wb_mod,
+  ~ K9_orientation | peer_c,
+  at = list(peer_c = peer_grid_wb - peer_mean_wb, wb_K7_c = 0)
+)
+pred_df_wb <- as.data.frame(pred_wb) |>
+  mutate(peer = peer_c + peer_mean_wb)
+
+# Number of individuals per measurement value and group (from 2.33 onwards)
+obs_wb <- dat_rq2_wb_k9 %>%
+  filter(K7_ResilFriends >= 2.33) %>%
+  mutate(peer = round(K7_ResilFriends, 2)) %>%
+  count(peer, K9_orientation) %>%
+  tidyr::complete(peer, K9_orientation, fill = list(n = 0))
+
+# Main plot (full scale 1–4, without x-axis label)
+p_main_wb <- ggplot(
+  pred_df_wb,
+  aes(x = peer, y = emmean, color = K9_orientation,
+      fill = K9_orientation, linetype = K9_orientation)
+) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.12, color = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  coord_cartesian(xlim = c(2.2, 4.1), ylim = c(1, 4)) +
+  labs(y = "Predicted well-being at K9",
+       color = "Sexual orientation", fill = "Sexual orientation",
+       linetype = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text    = element_text(size = 9, color = "black"))
+
+# number row
+p_n_wb <- ggplot(obs_wb, aes(x = peer, y = K9_orientation,
+                             label = n, color = K9_orientation)) +
+  geom_text(size = 3) +
+  scale_color_manual(values = cols, guide = "none") +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  scale_y_discrete(limits = rev) +
+  coord_cartesian(xlim = c(2.2, 4.1)) +
+  labs(x = "Peer support at K7", y = NULL) +
+  theme_classic(base_size = 10) +
+  theme(axis.text    = element_text(size = 9, color = "black"),
+        axis.line.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+p_int_wb <- (p_main_wb / p_n_wb +
+  plot_layout(heights = c(5, 1), guides = "collect")) &
+  theme(legend.position  = "bottom",
+        legend.title     = element_text(size = 10),
+        legend.text      = element_text(size = 9),
+        legend.key.width = unit(1.2, "cm"))
+
+p_int_wb
+
+ggsave("abb_h2a_wellbeing.png", p_int_wb,
+       width = 14, height = 10, units = "cm", dpi = 300)
+
+# For the figure caption: how many individuals fall below 2.33?
+sum(dat_rq2_wb_k9$K7_ResilFriends < 2.33)
+```
+
+### Model assumptions
+
+```{r}
+diagnose_rq2 <- function(model_base, model_mod,
+                         baseline_var, outcome_name) {
+
+  # Extract model data
+  dat <- model.frame(model_mod)
+
+  std_res <- rstandard(model_mod)
+  res <- residuals(model_mod)
+  fit <- fitted(model_mod)
+  cd <- cooks.distance(model_mod)
+
+  threshold <- 4 / nobs(model_mod)
+
+  diag_data <- data.frame(
+    fitted = fit,
+    residual = res,
+    std_res = std_res,
+    sqrt_abs_res = sqrt(abs(std_res))
+  )
+
+  # 1. Q-Q plot
+  p_qq <- ggplot(diag_data, aes(sample = std_res)) +
+    stat_qq(alpha = 0.4) +
+    stat_qq_line(color = "red") +
+    labs(title = "Q-Q Plot: Residuals") +
+    theme_minimal()
+
+  # 2. Residual distribution
+  p_hist <- ggplot(diag_data, aes(x = std_res)) +
+    geom_histogram(bins = 35, fill = "steelblue") +
+    labs(
+      title = "Residual Distribution",
+      x = "Standardized Residuals",
+      y = "Frequency"
+    ) +
+    theme_minimal()
+
+  # 3. Residuals vs. fitted
+  p_fitted <- ggplot(
+    diag_data, aes(x = fitted, y = residual)
+  ) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "loess", se = FALSE,
+                color = "red") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    labs(
+      title = "Residuals vs. Fitted",
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme_minimal()
+
+  # 4. Scale-location
+  p_scale <- ggplot(
+    diag_data, aes(x = fitted, y = sqrt_abs_res)
+  ) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "loess", se = FALSE,
+                color = "red") +
+    labs(
+      title = "Scale-Location",
+      x = "Fitted Values",
+      y = "Sqrt(|Standardized Residuals|)"
+    ) +
+    theme_minimal()
+
+  # 5. Cook's distance
+  p_cooks <- ggplot(
+    data.frame(obs = seq_along(cd), cooks = cd),
+    aes(x = obs, y = cooks)
+  ) +
+    geom_segment(aes(xend = obs, yend = 0)) +
+    geom_hline(
+      yintercept = threshold,
+      color = "red",
+      linetype = "dashed"
+    ) +
+    labs(
+      title = "Cook's Distance",
+      x = "Observation",
+      y = "Cook's Distance"
+    ) +
+    theme_minimal()
+
+  # 6. Peer support by orientation
+  p_coverage <- ggplot(
+    dat, aes(x = peer_c, fill = K9_orientation)
+  ) +
+    geom_histogram(bins = 20) +
+    facet_wrap(~ K9_orientation) +
+    guides(fill = "none") +
+    labs(
+      title = "Peer Support by Orientation",
+      x = "Peer Support (centered)",
+      y = "Frequency"
+    ) +
+    theme_minimal()
+
+  # 7. Component-plus-residual plots
+  make_cr <- function(variable) {
+    local_model <- model_base
+    local_variable <- variable
+
+    ggplotify::as.ggplot(
+      function() {
+        car::crPlot(
+          local_model,
+          variable = local_variable
+        )
+      }
+    )
+  }
+
+  p_cr_baseline <- make_cr(baseline_var)
+  p_cr_peer <- make_cr("peer_c")
+  p_cr_ses <- make_cr("ses_c")
+
+# 8. Combine plots – 4 rows x 2 columns
+panel <- (
+  p_qq | p_fitted
+) / (
+  p_scale | p_cooks
+) / (
+  p_coverage | p_cr_baseline
+) / (
+  p_cr_peer | p_cr_ses
+) +
+  plot_annotation(
+    title = paste("Model Diagnostics –", outcome_name)
+  )
+
+  print(panel)
+
+  # 9. Outliers and influential observations
+  outliers <- which(abs(std_res) > 3)
+
+  cat("\nOUTLIERS |standardized residual| > 3:\n")
+  print(outliers)
+
+  cat("\nCOOK'S DISTANCE:\n")
+  cat("Threshold:", threshold, "\n")
+  cat("Cases above 4/n:", sum(cd > threshold), "\n")
+
+  print(head(sort(cd, decreasing = TRUE), 10))
+
+  # 10. Multicollinearity
+  cat("\nVIF – Base model:\n")
+  print(car::vif(model_base))
+
+  cat("\nVIF – Interaction model:\n")
+  print(car::vif(model_mod))
+
+  invisible(list(
+    panel = panel,
+    outliers = outliers,
+    cooks_distance = cd,
+    excluded_4n = which(cd > threshold)
+  ))
+}
+
+
+
+# H2a: Well-being
+diag_h2a <- diagnose_rq2(
+  model_rq2_wb_base,
+  model_rq2_wb_mod,
+  "wb_K7_c",
+  "Well-being"
+)
+
+ggsave(
+  "diagnostics_H2a.pdf",
+  plot = diag_h2a$panel,
+  width = 15,
+  height = 18,
+  units = "in"
+)
+```
+
+### Sensitivity Analysis
+
+```{r}
+# H2a – SENSITIVITY ANALYSIS
+# Ever-SMY classification, same analytical sample
+
+# 1. Prepare data
+dat_rq2_wb_ever <- dat_rq2_wb_k9 %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(
+    orientation_person %>%
+      select(person_id, orientation_ever),
+    by = "person_id"
+  )
+
+stopifnot(
+  nrow(dat_rq2_wb_ever) == nrow(dat_rq2_wb_k9),
+  !anyNA(dat_rq2_wb_ever$orientation_ever)
+)
+
+# 2. Compare classifications
+classification_h2a <- dat_rq2_wb_ever %>%
+  distinct(person_id, K9_orientation, orientation_ever) %>%
+  count(K9_orientation, orientation_ever)
+
+classification_h2a
+
+# 3. Fit sensitivity model
+model_rq2_wb_ever <- lm(
+  wellbeing ~ wb_K7_c + peer_c * orientation_ever +
+    sex + ses_c,
+  data = dat_rq2_wb_ever
+)
+
+summary(model_rq2_wb_ever)
+confint(model_rq2_wb_ever)
+
+# 4. Compare interaction coefficients
+main_term <- "peer_c:K9_orientationNon-heterosexual"
+ever_term <- "peer_c:orientation_everNon-heterosexual"
+
+comparison_h2a <- data.frame(
+  Model = c("Main analysis", "Ever-SMY classification"),
+  b = c(
+    coef(model_rq2_wb_mod)[main_term],
+    coef(model_rq2_wb_ever)[ever_term]
+  ),
+  CI_lower = c(
+    confint(model_rq2_wb_mod)[main_term, 1],
+    confint(model_rq2_wb_ever)[ever_term, 1]
+  ),
+  CI_upper = c(
+    confint(model_rq2_wb_mod)[main_term, 2],
+    confint(model_rq2_wb_ever)[ever_term, 2]
+  )
+)
+
+comparison_h2a
+
+# Well-being SMY confidence intervals
+emtrends(
+  model_rq2_wb_ever,
+  specs = ~ orientation_ever,
+  var = "peer_c"
+) %>%
+  confint()
+
+# 5. Calculate additional explained variance (Delta R²)
+
+# Well-being: Model without interaction
+model_rq2_wb_ever_main <- update(
+  model_rq2_wb_ever,
+  . ~ . - peer_c:orientation_ever
+)
+
+# Additional variance explained by interaction
+delta_r2_wb_ever <-
+  summary(model_rq2_wb_ever)$r.squared -
+  summary(model_rq2_wb_ever_main)$r.squared
+
+delta_r2_wb_ever
+
+
+```
+
+## H2b: internalizing symptoms
+
+```{r}
+# K7 Internalizing als Baseline-Wert pro Person
+baseline_int <- dat %>%
+  filter(wave == "K7") %>%
+  select(person_id, internalizing_K7 = internalizing)
+# überprüfen, dass jede Person nur eine Zeile braucht
+baseline_int %>% count(person_id) %>% filter(n > 1)
+
+# an Long-Datensatz anhängen
+dat_rq2_int <- dat %>%
+  left_join(baseline_int, by = "person_id")
+
+nrow(dat_rq2_int)
+
+
+# Nur vollständige Fälle für dieses Modell
+dat_rq2_int_k9 <- dat_rq2_int %>%
+  filter(wave == "K9") %>%
+  filter(
+    !is.na(internalizing),
+    !is.na(internalizing_K7),
+    !is.na(K7_ResilFriends),
+    !is.na(K9_orientation),
+    !is.na(sex),
+    !is.na(ses))%>%
+  mutate(ses_c = (ses - mean(ses[!duplicated(person_id)])) / 10)
+  
+
+# Internalizing Symptoms und Peersupport zentrieren ### -> vielleicht in ein separaten Chunk tun
+dat_rq2_int_k9 <- dat_rq2_int_k9 %>%
+  mutate(
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends),
+    int_K7_c = internalizing_K7 - mean(internalizing_K7)
+  )
+
+# Stichprobe kontrollieren
+nrow(dat_rq2_int_k9)
+table(dat_rq2_int_k9$K9_orientation)
+
+
+# Modell 1: Haupteffekt von Peer Support
+model_rq2_int_base <- lm(
+  internalizing ~ int_K7_c + peer_c + K9_orientation + sex + ses_c,
+  data = dat_rq2_int_k9
+)
+
+summary(model_rq2_int_base)
+
+
+# Modell 2: Moderation durch sexuelle Orientierung
+
+model_rq2_int_mod <- lm(
+  internalizing ~ int_K7_c + peer_c * K9_orientation + sex + ses_c,
+  data = dat_rq2_int_k9
+)
+
+summary(model_rq2_int_mod)
+
+# COhens D erhalten
+install.packages("parameters"); library(parameters)
+parameters::standardize_parameters(model_rq2_int_mod, method = "refit")
+
+# Konfidenzintervalle
+emtrends(
+  model_rq2_int_mod,
+  ~ K9_orientation,
+  var = "peer_c"
+) |>
+  summary(infer = c(TRUE, TRUE))
+
+confint(model_rq2_int_base)["peer_c", ]
+
+
+# Übersciht wie viele eingeschlossen wurde
+model_data_h2b <- dat_rq2_int_k9[
+  match(rownames(model.frame(model_rq2_int_mod)), rownames(dat_rq2_int_k9)),
+  , drop = FALSE
+]
+
+model_data_h2b %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants")
+```
+
+### Plot
+
+```{r}
+library(patchwork)
+
+# Anzahl Personen pro Messwert und Gruppe (ab 2.33)
+obs <- dat_rq2_int_k9 %>%
+  filter(K7_ResilFriends >= 2.33) %>%
+  mutate(peer = round(K7_ResilFriends, 2)) %>%
+  count(peer, K9_orientation) %>%
+  tidyr::complete(peer, K9_orientation, fill = list(n = 0))
+
+# Hauptplot (ganze Skala, ohne x-Achsenbeschriftung)
+p_main <- ggplot(
+  pred_df_int,
+  aes(x = peer, y = emmean, color = K9_orientation,
+      fill = K9_orientation, linetype = K9_orientation)
+) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.12, color = NA) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  coord_cartesian(xlim = c(2.2, 4.1), ylim = c(1, 5)) +
+  labs(y = "Predicted internalizing at K9",
+       color = "Sexual orientation", fill = "Sexual orientation",
+       linetype = "Sexual orientation") +
+  theme_classic(base_size = 10) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text    = element_text(size = 9, color = "black"))
+
+# Zahlenzeile
+p_n <- ggplot(obs, aes(x = peer, y = K9_orientation, label = n, color = K9_orientation)) +
+  geom_text(size = 3) +
+  scale_color_manual(values = cols, guide = "none") +
+  scale_x_continuous(breaks = c(2.5, 3, 3.5, 4)) +
+  scale_y_discrete(limits = rev) +
+  coord_cartesian(xlim = c(2.2, 4.1)) +
+  labs(x = "Peer support at K7", y = NULL) +
+  theme_classic(base_size = 10) +
+  theme(axis.text         = element_text(size = 9, color = "black"),
+        axis.line.y       = element_blank(),
+        axis.ticks.y      = element_blank())
+
+p_int_int <- (p_main / p_n +
+  plot_layout(heights = c(5, 1), guides = "collect")) &
+  theme(legend.position  = "bottom",
+        legend.title     = element_text(size = 10),
+        legend.text      = element_text(size = 9),
+        legend.key.width = unit(1.2, "cm"))
+
+p_int_int
+
+ggsave("abb_h2b_internalizing.png", p_int_int,
+       width = 14, height = 10, units = "cm", dpi = 300)
+```
+
+### Model Assumptions
+
+```{r}
+# H2b: Internalizing symptoms
+diag_h2b <- diagnose_rq2(
+  model_base = model_rq2_int_base,
+  model_mod = model_rq2_int_mod,
+  baseline_var = "int_K7_c",
+  outcome_name = "Internalizing Symptoms"
+)
+
+
+ggsave(
+  filename = "Diagnostics_H2b.pdf",
+  plot = diag_h2b$panel,
+  device = grDevices::pdf,
+  width = 15,
+  height = 18,
+  units = "in"
+)
+```
+
+### Sensitivity Analyses
+
+```{r}
+# Sensitivity analyses: Influential observations (H2b)
+
+# Cook's distance
+cd_int <- cooks.distance(model_rq2_int_mod)
+
+# Most influential observation
+top1_int <- which.max(cd_int)
+
+# Threshold: Cook's D > 4/n
+threshold_int <- 4 / nobs(model_rq2_int_mod)
+
+# Number of observations above threshold
+sum(cd_int > threshold_int)
+
+
+# Model excluding the most influential observation
+model_int_without1 <- update(
+  model_rq2_int_mod,
+  data = model.frame(model_rq2_int_mod)[
+    -top1_int, , drop = FALSE
+  ]
+)
+
+# Model excluding all observations above 4/n
+model_int_without4n <- update(
+  model_rq2_int_mod,
+  data = model.frame(model_rq2_int_mod)[
+    cd_int <= threshold_int, , drop = FALSE
+  ]
+)
+
+# Compare interaction coefficients
+c(
+  full = coef(model_rq2_int_mod)["peer_c:K9_orientationNon-heterosexual"],
+  without1 = coef(model_int_without1)["peer_c:K9_orientationNon-heterosexual"],
+  without4n = coef(model_int_without4n)["peer_c:K9_orientationNon-heterosexual"]
+)
+
+# Compare 95% confidence intervals
+rbind(
+  full = confint(model_rq2_int_mod)["peer_c:K9_orientationNon-heterosexual", ],
+  without1 = confint(model_int_without1)["peer_c:K9_orientationNon-heterosexual", ],
+  without4n = confint(model_int_without4n)["peer_c:K9_orientationNon-heterosexual", ]
+)
+
+
+# Number of observations in each model
+nobs(model_rq2_int_mod)     # Full sample
+nobs(model_int_without1)    # Excluding most influential observation
+nobs(model_int_without4n)   # Excluding observations with Cook's D > 4/n
+```
+
+```{r}
+# Sensitivity Analysis SMY-CLASSIFICATION
+# 1. Prepare sensitivity dataset
+dat_rq2_int_ever <- dat_rq2_int_k9 %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(
+    orientation_person %>%
+      select(person_id, orientation_ever),
+    by = "person_id"
+  ) %>%
+  mutate(
+    orientation_ever = factor(
+      orientation_ever,
+      levels = c("Heterosexual", "Non-heterosexual")
+    )
+  )
+
+# Verify identical sample and complete classifications
+stopifnot(
+  nrow(dat_rq2_int_ever) == nrow(dat_rq2_int_k9),
+  !anyNA(dat_rq2_int_ever$K9_orientation),
+  !anyNA(dat_rq2_int_ever$orientation_ever),
+  setequal(dat_rq2_int_ever$person_id,
+           dat_rq2_int_k9$person_id)
+)
+
+# 2. Compare classifications (count each participant once)
+classification_h2b <- dat_rq2_int_ever %>%
+  distinct(person_id, K9_orientation, orientation_ever) %>%
+  count(K9_orientation, orientation_ever)
+
+classification_h2b
+
+# 3. Fit sensitivity model
+model_rq2_int_ever <- lm(
+  internalizing ~ int_K7_c + peer_c * orientation_ever +
+    sex + ses_c,
+  data = dat_rq2_int_ever
+)
+
+summary(model_rq2_int_ever)
+confint(model_rq2_int_ever)
+
+# 4. Compare interaction coefficients and 95% CIs
+main_term <- "peer_c:K9_orientationNon-heterosexual"
+ever_term <- "peer_c:orientation_everNon-heterosexual"
+
+comparison_h2b <- data.frame(
+  Model = c("Main analysis", "Ever-SMY classification"),
+  b = unname(c(
+    coef(model_rq2_int_mod)[main_term],
+    coef(model_rq2_int_ever)[ever_term]
+  )),
+  CI_lower = c(
+    confint(model_rq2_int_mod)[main_term, 1],
+    confint(model_rq2_int_ever)[ever_term, 1]
+  ),
+  CI_upper = c(
+    confint(model_rq2_int_mod)[main_term, 2],
+    confint(model_rq2_int_ever)[ever_term, 2]
+  )
+)
+
+comparison_h2b
+
+# Internalizing symptoms SMY Confidence intervals
+emtrends(
+  model_rq2_int_ever,
+  specs = ~ orientation_ever,
+  var = "peer_c"
+) %>%
+  confint()
+
+
+# Internalizing symptoms: Model without interaction
+model_rq2_int_ever_main <- update(
+  model_rq2_int_ever,
+  . ~ . - peer_c:orientation_ever
+)
+
+# Additional variance explained by interaction
+delta_r2_int_ever <-
+  summary(model_rq2_int_ever)$r.squared -
+  summary(model_rq2_int_ever_main)$r.squared
+
+delta_r2_int_ever
+
+```
+
+# H3 explorative
+
+## H3a: well-being
+
+```{r}
+# H3a: Cross-sectional analysis at K7
+
+# create analysis sample
+dat_rq3_wb_smy <- dat %>%
+  filter(
+    wave == "K7",
+    K9_orientation == "Non-heterosexual",
+    !is.na(wellbeing),
+    !is.na(K7_BullVict4),
+    !is.na(K7_ResilFriends),
+    !is.na(sex),
+    !is.na(ses)
+  ) %>%
+  mutate(
+    ses_c = (ses - mean(ses)) / 10,
+    victim_c = K7_BullVict4 - mean(K7_BullVict4),
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends)
+  )
+
+# Sample size
+nrow(dat_rq3_wb_smy)
+
+# Check duplicate person IDs
+dat_rq3_wb_smy %>%
+  count(person_id) %>%
+  filter(n > 1)
+
+# Descriptive statistics
+summary(dat_rq3_wb_smy[
+  c("wellbeing", "K7_BullVict4",
+    "K7_ResilFriends", "ses")
+])
+
+
+# Model 1: Main effects
+
+
+model_rq3_wb_base <- lm(
+  wellbeing ~ victim_c + peer_c + sex + ses_c,
+  data = dat_rq3_wb_smy
+)
+
+summary(model_rq3_wb_base)
+
+
+# Model 2: Moderation
+
+
+model_rq3_wb_mod <- lm(
+  wellbeing ~ victim_c * peer_c + sex + ses_c,
+  data = dat_rq3_wb_smy
+)
+
+summary(model_rq3_wb_mod)
+
+# Standardized coefficients
+parameters::standardize_parameters(
+  model_rq3_wb_mod,
+  method = "refit"
+)
+
+# 95% confidence intervals
+confint(model_rq3_wb_base)
+confint(model_rq3_wb_mod)
+
+# Model fit
+summary(model_rq3_wb_base)$r.squared
+summary(model_rq3_wb_mod)$r.squared
+
+summary(model_rq3_wb_base)$adj.r.squared
+summary(model_rq3_wb_mod)$adj.r.squared
+
+# Additional explained variance
+delta_R2_wb <-
+  summary(model_rq3_wb_mod)$r.squared -
+  summary(model_rq3_wb_base)$r.squared
+
+delta_R2_wb
+
+# Model comparison
+anova(model_rq3_wb_base, model_rq3_wb_mod)
+
+# Included participants
+dat_rq3_wb_smy %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants")
+
+```
+### Model assumptions
+
+```{r}
+diagnose_rq3 <- function(model_base, model_mod, outcome_name) {
+
+  # 0. Extract diagnostic data
+  model_data <- model.frame(model_mod)
+
+  std_res <- rstandard(model_mod)
+  cd <- cooks.distance(model_mod)
+  threshold <- 4 / nobs(model_mod)
+
+  dat_diag <- data.frame(
+    fitted = fitted(model_mod),
+    residual = residuals(model_mod),
+    std_res = std_res,
+    sqrt_abs_res = sqrt(abs(std_res)),
+    cooks = cd,
+    observation = seq_along(cd)
+  )
+
+  # 1. Q-Q plot
+  p_qq <- ggplot(dat_diag, aes(sample = std_res)) +
+    stat_qq(alpha = 0.4, size = 0.8) +
+    stat_qq_line(color = "red") +
+    labs(
+      title = "Q-Q Plot: Residuals",
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal()
+
+  # 2. Residuals vs. fitted
+  p_fitted <- ggplot(
+    dat_diag,
+    aes(x = fitted, y = residual)
+  ) +
+    geom_point(alpha = 0.3, size = 0.8) +
+    geom_smooth(
+      method = "loess",
+      se = FALSE,
+      color = "red"
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed"
+    ) +
+    labs(
+      title = "Residuals vs. Fitted",
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme_minimal()
+
+  # 3. Scale-location
+  p_scale <- ggplot(
+    dat_diag,
+    aes(x = fitted, y = sqrt_abs_res)
+  ) +
+    geom_point(alpha = 0.3, size = 0.8) +
+    geom_smooth(
+      method = "loess",
+      se = FALSE,
+      color = "red"
+    ) +
+    labs(
+      title = "Scale-Location",
+      x = "Fitted Values",
+      y = "Sqrt(|Standardized Residuals|)"
+    ) +
+    theme_minimal()
+
+  # 4. Cook's distance
+  p_cooks <- ggplot(
+    dat_diag,
+    aes(x = observation, y = cooks)
+  ) +
+    geom_segment(
+      aes(xend = observation, yend = 0),
+      linewidth = 0.3
+    ) +
+    geom_hline(
+      yintercept = threshold,
+      color = "red",
+      linetype = "dashed"
+    ) +
+    labs(
+      title = "Cook's Distance",
+      x = "Observation",
+      y = "Cook's Distance"
+    ) +
+    theme_minimal()
+
+  # 5. Component-plus-residual plots
+  # Based on main-effects model
+
+  make_cr <- function(variable) {
+    ggplotify::as.ggplot(
+      function() {
+        car::crPlot(
+          model_base,
+          variable = variable )}) }
+
+  p_cr_victim <- make_cr("victim_c")
+  p_cr_peer <- make_cr("peer_c")
+  p_cr_ses <- make_cr("ses_c")
+
+  # 6. Predictor coverage
+  p_coverage <- ggplot(
+    model_data,
+    aes(x = victim_c, y = peer_c)
+  ) +
+    geom_jitter(
+      width = 0.03,
+      height = 0.03,
+      alpha = 0.3,
+      size = 0.8
+    ) +
+    labs(
+      title = "Predictor Coverage",
+      x = "Bullying Victimization (centered)",
+      y = "Peer Support (centered)"
+    ) +
+    theme_minimal()
+
+  # 7. Combine plots: 4 rows x 2 columns
+  panel <- (
+    p_qq | p_fitted
+  ) / (
+    p_scale | p_cooks
+  ) / (
+    p_cr_victim | p_cr_peer
+  ) / (
+    p_cr_ses | p_coverage
+  ) +
+    plot_annotation(
+      title = paste("Model Diagnostics –", outcome_name)
+    )
+
+  panel <- panel &
+    theme(
+      plot.title = element_text(
+        size = 11,
+        face = "bold"
+      ),
+      axis.title = element_text(size = 9),
+      axis.text = element_text(size = 8)
+    )
+
+  print(panel)
+
+  # 8. Outliers
+  outliers <- which(abs(std_res) > 3)
+
+  cat("\nOBSERVATIONS WITH |STANDARDIZED RESIDUAL| > 3:\n")
+  print(outliers)
+
+  # 9. Influential observations
+  cat("\nCOOK'S DISTANCE:\n")
+  cat("Threshold (4/n):", threshold, "\n")
+  cat("Observations above 4/n:", sum(cd > threshold), "\n")
+
+  cat("\n10 largest Cook's distances:\n")
+  print(head(sort(cd, decreasing = TRUE), 10))
+
+  # 10. Multicollinearity
+  cat("\nVIF – Base model:\n")
+  print(car::vif(model_base))
+
+  cat("\nVIF – Interaction model:\n")
+  print(car::vif(model_mod))
+
+  # 11. Return diagnostic results
+  invisible(list(
+    panel = panel,
+    cooks_distance = cd,
+    outliers = outliers,
+    excluded_4n = which(cd > threshold)
+  ))
+}
+
+# H3a: Wellbeing
+diag_h3a <- diagnose_rq3(
+  model_base = model_rq3_wb_base,
+  model_mod = model_rq3_wb_mod,
+  outcome_name = "Well-being"
+)
+
+# save pdf
+ggsave(
+  "diagnostics_H3a.pdf",
+  plot = diag_h3a$panel,
+  width = 10,
+  height = 14,
+  units = "in"
+)
+
+```
+
+### Sensitivity Analyses
+
+```{r}
+# H3a: Sensitivity analysis – influential observations
+
+# Cook's Distance
+cd_wb <- cooks.distance(model_rq3_wb_mod)
+threshold_wb <- 4 / nobs(model_rq3_wb_mod)
+
+# Identify influential observations
+top1_wb <- which.max(cd_wb)
+excluded_wb <- which(cd_wb > threshold_wb)
+
+# Number of observations above 4/n
+length(excluded_wb)
+
+
+# 1. Model without most influential observation
+model_wb_without1 <- update(
+  model_rq3_wb_mod,
+  data = model.frame(model_rq3_wb_mod)[
+    -top1_wb, , drop = FALSE
+  ]
+)
+
+# 2. Model without observations above 4/n
+model_wb_without4n <- update(
+  model_rq3_wb_mod,
+  data = model.frame(model_rq3_wb_mod)[
+    cd_wb <= threshold_wb, , drop = FALSE
+  ]
+)
+
+
+# Compare interaction coefficients
+c(
+  full = coef(model_rq3_wb_mod)["victim_c:peer_c"],
+  without1 = coef(model_wb_without1)["victim_c:peer_c"],
+  without4n = coef(model_wb_without4n)["victim_c:peer_c"]
+)
+
+# Compare confidence intervals
+rbind(
+  full = confint(model_rq3_wb_mod)["victim_c:peer_c", ],
+  without1 = confint(model_wb_without1)["victim_c:peer_c", ],
+  without4n = confint(model_wb_without4n)["victim_c:peer_c", ]
+)
+
+
+# 3. Inspect most influential observation
+model_data_wb <- model.frame(model_rq3_wb_mod)
+
+# Match model rows to original dataset
+case_wb <- dat_rq3_wb_smy[
+  match(rownames(model_data_wb),
+        rownames(dat_rq3_wb_smy)), ,
+  drop = FALSE
+]
+
+# Most influential person
+case_wb[top1_wb, c(
+  "person_id",
+  "K7_BullVict4",
+  "K7_ResilFriends",
+  "wellbeing",
+  "sex",
+  "ses"
+)]
+
+# Diagnostic values for this person
+data.frame(
+  cooks_d = cd_wb[top1_wb],
+  leverage = hatvalues(model_rq3_wb_mod)[top1_wb],
+  std_residual = rstandard(model_rq3_wb_mod)[top1_wb],
+  dfbetas_interaction =
+    dfbetas(model_rq3_wb_mod)[
+      top1_wb, "victim_c:peer_c"
+    ]
+)
+
+
+# 4. Inspect all observations above 4/n
+excluded_cases_wb <- case_wb[excluded_wb, c(
+  "person_id",
+  "K7_BullVict4",
+  "K7_ResilFriends",
+  "wellbeing"
+)]
+
+excluded_cases_wb$cooks_d <- cd_wb[excluded_wb]
+
+excluded_cases_wb$dfbetas_interaction <-
+  dfbetas(model_rq3_wb_mod)[
+    excluded_wb, "victim_c:peer_c"
+  ]
+
+excluded_cases_wb[
+  order(excluded_cases_wb$cooks_d, decreasing = TRUE),
+]
+```
+
+```{r}
+# Sensitivity analysis: EVER-SMY CLASSIFICATION
+
+# 1. Add previously created orientation_ever variable
+dat_rq3_wb_ever <- dat %>%
+  filter(wave == "K7") %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(
+    orientation_person %>%
+      select(person_id, orientation_ever),
+    by = "person_id"
+  )
+
+# Check classification
+stopifnot(!anyNA(dat_rq3_wb_ever$orientation_ever))
+
+# 2. Select Ever-SMY and complete cases
+dat_rq3_wb_ever <- dat_rq3_wb_ever %>%
+  filter(
+    orientation_ever == "Non-heterosexual",
+    !is.na(wellbeing),
+    !is.na(K7_BullVict4),
+    !is.na(K7_ResilFriends),
+    !is.na(sex),
+    !is.na(ses)
+  ) %>%
+  mutate(
+    ses_c = (ses - mean(ses)) / 10,
+    victim_c = K7_BullVict4 - mean(K7_BullVict4),
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends)
+  )
+
+# 3. Main-effects model
+model_rq3_wb_ever_base <- lm(
+  wellbeing ~ victim_c + peer_c + sex + ses_c,
+  data = dat_rq3_wb_ever
+)
+
+# 4. Interaction model
+model_rq3_wb_ever_mod <- lm(
+  wellbeing ~ victim_c * peer_c + sex + ses_c,
+  data = dat_rq3_wb_ever
+)
+
+# 5. Results
+summary(model_rq3_wb_ever_mod)
+
+confint(model_rq3_wb_ever_mod)
+
+# 6. Additional explained variance
+delta_R2_wb_ever <-
+  summary(model_rq3_wb_ever_mod)$r.squared -
+  summary(model_rq3_wb_ever_base)$r.squared
+
+delta_R2_wb_ever
+
+# 7. Sample size
+n_distinct(dat_rq3_wb_ever$person_id)
+```
+
+## H3b: internalizing
+
+```{r}
+# H3b: Cross-sectional moderation analysis at K7
+# K7-Datensatz mit vollständigen Modellvariablen – nur SMY
+dat_rq3_int_smy <- dat %>%
+  filter(
+    wave == "K7",
+    K9_orientation == "Non-heterosexual",
+    !is.na(internalizing),
+    !is.na(K7_BullVict4),
+    !is.na(K7_ResilFriends),
+    !is.na(sex),
+    !is.na(ses)) %>%
+  mutate(
+    # SES: 10-Punkte-Einheiten
+    ses_c = (ses - mean(ses)) / 10,
+
+    # Viktimisierung zentrieren
+    victim_c = K7_BullVict4 - mean(K7_BullVict4),
+
+    # Peer Support zentrieren
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends))
+
+# Stichprobengrösse
+nrow(dat_rq3_int_smy)
+
+# Prüfen, ob jede Person nur einmal vorkommt
+dat_rq3_int_smy %>%
+  count(person_id) %>%
+  filter(n > 1)
+
+# Deskriptive Statistiken
+summary(dat_rq3_int_smy[
+  c("internalizing", "K7_BullVict4",
+    "K7_ResilFriends", "ses")])
+
+
+# Main effects
+model_rq3_int_base <- lm(
+  internalizing ~ victim_c + peer_c + sex + ses_c,
+  data = dat_rq3_int_smy)
+
+summary(model_rq3_int_base)
+
+
+# MODEL 2: Victimization × Peer Support
+model_rq3_int_mod <- lm(
+  internalizing ~ victim_c * peer_c + sex + ses_c,
+  data = dat_rq3_int_smy)
+
+summary(model_rq3_int_mod)
+
+# Standardisierte Regressionskoeffizienten
+parameters::standardize_parameters(
+  model_rq3_int_mod,
+  method = "refit")
+
+# 95%-Konfidenzintervalle
+confint(model_rq3_int_base)
+confint(model_rq3_int_mod)
+
+
+# MODEL FIT
+# R²
+summary(model_rq3_int_base)$r.squared
+summary(model_rq3_int_mod)$r.squared
+
+# Adjustiertes R²
+summary(model_rq3_int_base)$adj.r.squared
+summary(model_rq3_int_mod)$adj.r.squared
+
+# Zusätzlich erklärte Varianz durch die Interaktion
+delta_R2_int <-
+  summary(model_rq3_int_mod)$r.squared -
+  summary(model_rq3_int_base)$r.squared
+
+delta_R2_int
+
+# Modellvergleich
+anova(model_rq3_int_base, model_rq3_int_mod)
+
+# included participants
+dat_rq3_int_smy %>%
+  distinct(person_id, K9_orientation) %>%
+  count(K9_orientation, name = "N_participants")
+
+```
+
+### Model Assumptions
+
+```{r}
+# H3b: Internalizing symptoms
+diag_h3b <- diagnose_rq3(
+  model_base = model_rq3_int_base,
+  model_mod = model_rq3_int_mod,
+  outcome_name = "Internalizing Symptoms")
+
+# save as pdf
+ggsave(
+  "diagnostics_H3b.pdf",
+  plot = diag_h3b$panel,
+  width = 10,
+  height = 14,
+  units = "in")
+```
+
+### Sensitivity Anylyses
+
+```{r}
+# H3b: Sensitivity analysis – influential observations
+
+cd_int <- cooks.distance(model_rq3_int_mod)
+threshold_int <- 4 / nobs(model_rq3_int_mod)
+
+# Identify influential observations
+top1_int <- which.max(cd_int)
+excluded_int <- which(cd_int > threshold_int)
+
+# Number of observations above 4/n
+length(excluded_int)
+
+# Model without most influential observation
+model_int_without1 <- update(
+  model_rq3_int_mod,
+  data = model.frame(model_rq3_int_mod)[
+    -top1_int, , drop = FALSE])
+
+# Model without observations above 4/n
+model_int_without4n <- update(
+  model_rq3_int_mod,
+  data = model.frame(model_rq3_int_mod)[
+    cd_int <= threshold_int, , drop = FALSE])
+
+# Compare interaction coefficients
+c(
+  full = coef(model_rq3_int_mod)["victim_c:peer_c"],
+  without1 = coef(model_int_without1)["victim_c:peer_c"],
+  without4n = coef(model_int_without4n)["victim_c:peer_c"])
+
+# Compare 95% confidence intervals
+rbind(
+  full = confint(model_rq3_int_mod)["victim_c:peer_c", ],
+  without1 = confint(model_int_without1)["victim_c:peer_c", ],
+  without4n = confint(model_int_without4n)["victim_c:peer_c", ])
+```
+
+```{r}
+# H3b: Sensitivity analysis – Ever-SMY classification
+
+# 1. Add previously created orientation_ever variable
+dat_rq3_int_ever <- dat %>%
+  filter(wave == "K7") %>%
+  select(-any_of("orientation_ever")) %>%
+  left_join(
+    orientation_person %>%
+      select(person_id, orientation_ever),
+    by = "person_id" )
+
+# Check classification
+stopifnot(!anyNA(dat_rq3_int_ever$orientation_ever))
+
+# 2. Select Ever-SMY and complete cases
+dat_rq3_int_ever <- dat_rq3_int_ever %>%
+  filter(
+    !is.na(K9_orientation),
+    orientation_ever == "Non-heterosexual",
+    !is.na(internalizing),
+    !is.na(K7_BullVict4),
+    !is.na(K7_ResilFriends),
+    !is.na(sex),
+    !is.na(ses)) %>%
+  mutate(
+    ses_c = (ses - mean(ses)) / 10,
+    victim_c = K7_BullVict4 - mean(K7_BullVict4),
+    peer_c = K7_ResilFriends - mean(K7_ResilFriends))
+
+# 3. Main-effects model
+model_rq3_int_ever_base <- lm(
+  internalizing ~ victim_c + peer_c + sex + ses_c,
+  data = dat_rq3_int_ever)
+
+# 4. Interaction model
+model_rq3_int_ever_mod <- lm(
+  internalizing ~ victim_c * peer_c + sex + ses_c,
+  data = dat_rq3_int_ever)
+
+# 5. Results
+summary(model_rq3_int_ever_mod)
+
+confint(model_rq3_int_ever_mod)
+
+# 6. Additional explained variance
+delta_R2_int_ever <-
+  summary(model_rq3_int_ever_mod)$r.squared -
+  summary(model_rq3_int_ever_base)$r.squared
+
+delta_R2_int_ever
+
+# 7. Sample size
+n_distinct(dat_rq3_int_ever$person_id)
+
+# 8. K9 orientation distribution in Ever-SMY sample
+table(
+  dat_rq3_int_ever$K9_orientation,
+  useNA = "ifany")
+
+# 9. Compare participants with main analysis
+
+# Participants added under Ever-SMY
+length(setdiff(
+  dat_rq3_int_ever$person_id,
+  dat_rq3_int_smy$person_id))
+
+# Participants present in main analysis but not Ever-SMY
+length(setdiff(
+  dat_rq3_int_smy$person_id,
+  dat_rq3_int_ever$person_id))
+```
